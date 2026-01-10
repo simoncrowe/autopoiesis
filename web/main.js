@@ -1,9 +1,3 @@
-// Build wasm with:
-//   wasm-pack build wasm --release --target web --out-dir web/pkg
-// Then serve the repo root (e.g. python -m http.server) and open /web/
-
-import init, { Simulation, GrayScottParams } from "../wasm/web/pkg/abiogenesis.js";
-
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
 
@@ -58,41 +52,6 @@ function mat4Perspective(fovyRad, aspect, near, far) {
     0,
     (2 * far * near) * nf,
     0,
-  ]);
-}
-
-function mat4Translation(x, y, z) {
-  const m = mat4Identity();
-  m[12] = x;
-  m[13] = y;
-  m[14] = z;
-  return m;
-}
-
-function mat4RotationYX(yaw, pitch) {
-  const cy = Math.cos(yaw);
-  const sy = Math.sin(yaw);
-  const cp = Math.cos(pitch);
-  const sp = Math.sin(pitch);
-
-  // Column-major.
-  return new Float32Array([
-    cy,
-    0,
-    -sy,
-    0,
-    sy * sp,
-    cp,
-    cy * sp,
-    0,
-    sy * cp,
-    -sp,
-    cy * cp,
-    0,
-    0,
-    0,
-    0,
-    1,
   ]);
 }
 
@@ -198,8 +157,6 @@ void main() {
 
 class FlyCamera {
   constructor() {
-    // Simulation volume is normalized to roughly [-0.5, 0.5] in each axis.
-    // Start the camera 25% into the volume on +Z.
     this.pos = [0, 0, 0.25];
     this.yaw = 0;
     this.pitch = 0;
@@ -208,25 +165,34 @@ class FlyCamera {
 
   viewMatrix() {
     const f = this.forward();
-    const r = this.right();
+
+    // Build an orthonormal basis (right-handed).
+    const worldUp = [0, 1, 0];
+    let r = vec3Cross(f, worldUp);
+    if (Math.hypot(r[0], r[1], r[2]) < 1e-6) {
+      // Forward is too close to worldUp; pick a different up.
+      r = vec3Cross(f, [1, 0, 0]);
+    }
+    r = vec3Normalize(r);
     const u = vec3Normalize(vec3Cross(r, f));
 
     const tx = -vec3Dot(r, this.pos);
     const ty = -vec3Dot(u, this.pos);
     const tz = vec3Dot(f, this.pos);
 
-    // Column-major view matrix.
+    // Column-major storage, but these are ROWS of the view matrix.
+    // (This is easy to get wrong and causes "orbiting" when looking around.)
     return new Float32Array([
       r[0],
-      r[1],
-      r[2],
-      0,
       u[0],
-      u[1],
-      u[2],
-      0,
       -f[0],
+      0,
+      r[1],
+      u[1],
       -f[1],
+      0,
+      r[2],
+      u[2],
       -f[2],
       0,
       tx,
@@ -237,7 +203,6 @@ class FlyCamera {
   }
 
   forward() {
-    // OpenGL-style: look down -Z at yaw=0, pitch=0.
     const cy = Math.cos(this.yaw);
     const sy = Math.sin(this.yaw);
     const cp = Math.cos(this.pitch);
@@ -246,9 +211,14 @@ class FlyCamera {
   }
 
   right() {
-    const cy = Math.cos(this.yaw);
-    const sy = Math.sin(this.yaw);
-    return vec3Normalize([cy, 0, sy]);
+    // Used for movement; derived from current forward direction.
+    const f = this.forward();
+    const worldUp = [0, 1, 0];
+    let r = vec3Cross(f, worldUp);
+    if (Math.hypot(r[0], r[1], r[2]) < 1e-6) {
+      r = vec3Cross(f, [1, 0, 0]);
+    }
+    return vec3Normalize(r);
   }
 }
 
@@ -284,26 +254,15 @@ function createMeshGpu(gl) {
     colBuf,
     idxBuf,
     indexCount: 0,
+    vertexCount: 0,
   };
 }
 
-function uploadMeshFromWasm(gl, wasm, sim, gpuMesh) {
-  // Positions
-  const posPtr = sim.mesh_positions_ptr();
-  const posLen = sim.mesh_positions_len();
-  const pos = new Float32Array(wasm.memory.buffer, posPtr, posLen);
-
-  const norPtr = sim.mesh_normals_ptr();
-  const norLen = sim.mesh_normals_len();
-  const nor = new Float32Array(wasm.memory.buffer, norPtr, norLen);
-
-  const colPtr = sim.mesh_colors_ptr();
-  const colLen = sim.mesh_colors_len();
-  const col = new Float32Array(wasm.memory.buffer, colPtr, colLen);
-
-  const idxPtr = sim.mesh_indices_ptr();
-  const idxLen = sim.mesh_indices_len();
-  const idx = new Uint32Array(wasm.memory.buffer, idxPtr, idxLen);
+function uploadMeshFromBuffers(gl, gpuMesh, msg) {
+  const pos = new Float32Array(msg.positions);
+  const nor = new Float32Array(msg.normals);
+  const col = new Float32Array(msg.colors);
+  const idx = new Uint32Array(msg.indices);
 
   gl.bindVertexArray(gpuMesh.vao);
 
@@ -322,10 +281,11 @@ function uploadMeshFromWasm(gl, wasm, sim, gpuMesh) {
   gl.bindVertexArray(null);
 
   gpuMesh.indexCount = idx.length;
+  gpuMesh.vertexCount = msg.vertexCount || 0;
 }
 
+
 async function main() {
-  const wasm = await init();
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
   if (!gl) throw new Error("WebGL2 not supported");
 
@@ -343,22 +303,11 @@ async function main() {
   const cam = new FlyCamera();
 
   const viewRadius = 0.35;
+  const iso = 0.5;
+  const meshColor = [0.15, 0.65, 0.9, 0.9];
+
   const fogColor = [0.04, 0.06, 0.08];
-  const fogDensity = 8.0;
-
-  const params = new GrayScottParams();
-  // A reasonably lively Gray–Scott regime.
-  params.set_du(0.16);
-  params.set_dv(0.08);
-  params.set_feed(0.037);
-  params.set_kill(0.06);
-
-  const sim = new Simulation(192, 192, 192, 1337, params);
-  // Smaller dt => more stable, slower evolution.
-  sim.set_dt(0.1);
-  // Choose one seed method:
-  // sim.seed_sphere(0.25);
-  sim.seed_perlin(6.0, 4, 0.0, 1.0);
+  const fogDensity = 4.0;
 
   const gpuMesh = createMeshGpu(gl);
 
@@ -372,7 +321,6 @@ async function main() {
   });
   window.addEventListener("keyup", (e) => keys.delete(e.code));
 
-  // Mouse-look via Pointer Lock.
   canvas.addEventListener("click", async () => {
     if (document.pointerLockElement !== canvas) {
       await canvas.requestPointerLock();
@@ -381,46 +329,62 @@ async function main() {
 
   window.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
-    cam.yaw += e.movementX * 0.002;
-    cam.pitch += e.movementY * 0.002;
+    // Non-inverted: moving mouse right => look right, mouse up => look up.
+    cam.yaw += e.movementX * 0.0015;
+    cam.pitch += e.movementY * 0.0015;
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch));
   });
 
   window.addEventListener("wheel", (e) => {
     const sign = Math.sign(e.deltaY);
-    cam.moveSpeed = Math.max(0.1, Math.min(12.0, cam.moveSpeed * (sign > 0 ? 0.9 : 1.1)));
+    cam.moveSpeed = Math.max(0.1, Math.min(8.0, cam.moveSpeed * (sign > 0 ? 0.9 : 1.1)));
   });
 
-  let lastT = performance.now();
-  let accum = 0;
-  let frame = 0;
+  const worker = new Worker(new URL("./sim_worker.js", import.meta.url), { type: "module" });
 
-  function step(dt) {
-    // Fixed-ish sim step.
-    accum += dt;
-    const tick = 1 / 6;
-    while (accum >= tick) {
-      sim.step(1);
-      accum -= tick;
+  let lastMeshMs = 0;
+  let lastStepsPerSec = 0;
+  let lastTotalSteps = 0;
+  let workerReady = false;
+
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    if (!msg || typeof msg !== "object") return;
+
+    if (msg.type === "ready") {
+      workerReady = true;
+      return;
     }
 
-    // Mesh less frequently.
-    frame++;
-    if (frame % 10 === 0) {
-      const iso = 0.5;
-      sim.generate_isosurface_mesh_visible(
-        cam.pos[0],
-        cam.pos[1],
-        cam.pos[2],
-        viewRadius,
-        iso,
-        0.15,
-        0.65,
-        0.9,
-        0.9,
-      );
-      uploadMeshFromWasm(gl, wasm, sim, gpuMesh);
+    if (msg.type === "mesh") {
+      uploadMeshFromBuffers(gl, gpuMesh, msg);
+      lastMeshMs = msg.meshMs || 0;
+      lastStepsPerSec = msg.stepsPerSec || 0;
+      lastTotalSteps = msg.totalSteps || 0;
+      return;
     }
+
+    if (msg.type === "error") {
+      console.error(msg.message);
+      statsEl.textContent = String(msg.message);
+    }
+  };
+
+  let lastCamSendAt = 0;
+  function sendCamera() {
+    const now = performance.now();
+    // Throttle camera updates to reduce message spam.
+    if (now - lastCamSendAt < 50) return;
+    lastCamSendAt = now;
+
+    if (!workerReady) return;
+    worker.postMessage({
+      type: "camera",
+      pos: cam.pos,
+      radius: viewRadius,
+      iso,
+      color: meshColor,
+    });
   }
 
   function moveCam(dt) {
@@ -437,6 +401,7 @@ async function main() {
     cam.pos = vec3Add(cam.pos, delta);
   }
 
+  let lastT = performance.now();
   function render(tNow) {
     const dt = Math.min(0.05, (tNow - lastT) / 1000);
     lastT = tNow;
@@ -445,7 +410,7 @@ async function main() {
     gl.viewport(0, 0, canvas.width, canvas.height);
 
     moveCam(dt);
-    step(dt);
+    sendCamera();
 
     const aspect = canvas.width / canvas.height;
     const proj = mat4Perspective((60 * Math.PI) / 180, aspect, 0.01, 100.0);
@@ -468,31 +433,11 @@ async function main() {
     }
     gl.bindVertexArray(null);
 
-    const verts = sim.mesh_vertex_count();
-    const vMin = sim.v_min();
-    const vMax = sim.v_max();
-    const ge = sim.v_count_ge(0.5);
-    const vRange = vMax - vMin;
-    const dtSim = sim.dt();
-    statsEl.textContent = `verts ${verts.toLocaleString()}  iso 0.5  r ${viewRadius.toFixed(2)}  V[${vMin.toFixed(6)},${vMax.toFixed(6)}]  dV ${vRange.toExponential(2)}  ge0.5 ${ge}  dt ${dtSim.toFixed(3)}  speed ${cam.moveSpeed.toFixed(2)}`;
+    const vtx = gpuMesh.vertexCount;
+    statsEl.textContent = `verts ${vtx.toLocaleString()}  iso ${iso.toFixed(2)}  r ${viewRadius.toFixed(2)}  sim ${lastStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  steps ${Math.floor(lastTotalSteps).toLocaleString()}`;
 
     requestAnimationFrame(render);
   }
-
-  // Build an initial mesh immediately.
-  const iso0 = 0.5;
-  sim.generate_isosurface_mesh_visible(
-    cam.pos[0],
-    cam.pos[1],
-    cam.pos[2],
-    viewRadius,
-    iso0,
-    0.15,
-    0.65,
-    0.9,
-    0.9,
-  );
-  uploadMeshFromWasm(gl, wasm, sim, gpuMesh);
 
   requestAnimationFrame(render);
 }

@@ -4,6 +4,7 @@ Abiogenesis-inspired pattern exploration MVP:
 - 3D Gray–Scott reaction–diffusion simulation (Rust → wasm)
 - Isosurface extraction in wasm (marching tetrahedra)
 - WebGL 2.0 viewer + free-fly camera (JS)
+- Simulation + meshing run in a Web Worker (smooth rendering)
 
 ## Build + Run
 
