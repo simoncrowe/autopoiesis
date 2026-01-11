@@ -317,7 +317,7 @@ async function main() {
 
   let viewRadius = 0.35;
   let volumeThreshold = 0.5;
-  let gradMagGain = 6.0;
+  let gradMagGain = 25.0;
   const meshColor = [0.15, 0.65, 0.9, 0.9];
 
   const fogColor = [0.04, 0.06, 0.08];
@@ -349,11 +349,12 @@ async function main() {
     }
   });
 
+  const lookSensitivity = 0.0015 * 0.75;
   window.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
     // Non-inverted: moving mouse right => look right, mouse up => look up.
-    cam.yaw += e.movementX * 0.0015;
-    cam.pitch += e.movementY * 0.0015;
+    cam.yaw += e.movementX * lookSensitivity;
+    cam.pitch += e.movementY * lookSensitivity;
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch));
   });
 
@@ -769,8 +770,9 @@ async function main() {
     });
   }
 
+  const moveSpeedScale = 0.5;
   function moveCam(dt) {
-    const v = cam.moveSpeed * dt;
+    const v = cam.moveSpeed * dt * moveSpeedScale;
     let delta = [0, 0, 0];
     const f = cam.forward();
     const r = cam.right();
