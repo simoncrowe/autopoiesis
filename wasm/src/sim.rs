@@ -529,7 +529,15 @@ impl Simulation {
         self.v.iter().filter(|&&x| x >= threshold).count()
     }
 
-    // Raw access for fast snapshotting (e.g. into SharedArrayBuffer).
+    // Raw access for fast snapshotting / JS-side seeding (e.g. into SharedArrayBuffer).
+    pub fn u_ptr(&self) -> u32 {
+        self.u.as_ptr() as u32
+    }
+
+    pub fn u_len(&self) -> usize {
+        self.u.len()
+    }
+
     pub fn v_ptr(&self) -> u32 {
         self.v.as_ptr() as u32
     }
@@ -682,12 +690,12 @@ impl Simulation {
                         iso,
                         color,
                         &mut self.mesh,
-                        x0,
-                        x1,
-                        y0,
-                        y1,
-                        z0,
-                        z1,
+                        x0 as isize,
+                        x1 as isize,
+                        y0 as isize,
+                        y1 as isize,
+                        z0 as isize,
+                        z1 as isize,
                         stride,
                     );
                 }
@@ -990,6 +998,24 @@ impl ScalarFieldMesher {
             return;
         }
 
+        fn floor_div(a: isize, b: isize) -> isize {
+            debug_assert!(b > 0);
+            if a >= 0 {
+                a / b
+            } else {
+                -((-a + b - 1) / b)
+            }
+        }
+
+        fn imod(a: isize, m: usize) -> usize {
+            let m = m as isize;
+            let mut r = a % m;
+            if r < 0 {
+                r += m;
+            }
+            r as usize
+        }
+
         let cubes_x = self.nx.saturating_sub(1);
         let cubes_y = self.ny.saturating_sub(1);
         let cubes_z = self.nz.saturating_sub(1);
@@ -1005,7 +1031,7 @@ impl ScalarFieldMesher {
         let rad = radius.max(0.0);
         let rad2 = rad * rad;
 
-        // Camera in cube coordinates.
+        // Camera in cube coordinates (can be unbounded in global space).
         let cam_ix = (cam_x + 0.5) * fx;
         let cam_iy = (cam_y + 0.5) * fy;
         let cam_iz = (cam_z + 0.5) * fz;
@@ -1014,20 +1040,20 @@ impl ScalarFieldMesher {
         let ry = rad * fy;
         let rz = rad * fz;
 
-        let min_x = (cam_ix - rx).floor().max(0.0) as usize;
-        let min_y = (cam_iy - ry).floor().max(0.0) as usize;
-        let min_z = (cam_iz - rz).floor().max(0.0) as usize;
+        let min_x = (cam_ix - rx).floor() as isize;
+        let min_y = (cam_iy - ry).floor() as isize;
+        let min_z = (cam_iz - rz).floor() as isize;
 
-        let max_x = (cam_ix + rx).ceil().min((cubes_x - 1) as f32) as usize;
-        let max_y = (cam_iy + ry).ceil().min((cubes_y - 1) as f32) as usize;
-        let max_z = (cam_iz + rz).ceil().min((cubes_z - 1) as f32) as usize;
+        let max_x = (cam_ix + rx).ceil() as isize;
+        let max_y = (cam_iy + ry).ceil() as isize;
+        let max_z = (cam_iz + rz).ceil() as isize;
 
-        let min_cx = min_x / CHUNK;
-        let min_cy = min_y / CHUNK;
-        let min_cz = min_z / CHUNK;
-        let max_cx = max_x / CHUNK;
-        let max_cy = max_y / CHUNK;
-        let max_cz = max_z / CHUNK;
+        let min_cx = floor_div(min_x, CHUNK as isize);
+        let min_cy = floor_div(min_y, CHUNK as isize);
+        let min_cz = floor_div(min_z, CHUNK as isize);
+        let max_cx = floor_div(max_x, CHUNK as isize);
+        let max_cy = floor_div(max_y, CHUNK as isize);
+        let max_cz = floor_div(max_z, CHUNK as isize);
 
         let color = [r, g, b, a];
 
@@ -1049,7 +1075,11 @@ impl ScalarFieldMesher {
         for cz in min_cz..=max_cz {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
-                    let ci = self.chunk_index(cx, cy, cz);
+                    let cxw = imod(cx, self.chunk_nx);
+                    let cyw = imod(cy, self.chunk_ny);
+                    let czw = imod(cz, self.chunk_nz);
+                    let ci = cxw + self.chunk_nx * (cyw + self.chunk_ny * czw);
+
                     let cmin = self.chunk_min_next[ci];
                     let cmax = self.chunk_max_next[ci];
                     if !cmin.is_finite() {
@@ -1059,13 +1089,13 @@ impl ScalarFieldMesher {
                         continue;
                     }
 
-                    let x0 = cx * CHUNK;
-                    let y0 = cy * CHUNK;
-                    let z0 = cz * CHUNK;
+                    let x0 = cx * CHUNK as isize;
+                    let y0 = cy * CHUNK as isize;
+                    let z0 = cz * CHUNK as isize;
 
-                    let x1 = ((cx + 1) * CHUNK).min(cubes_x);
-                    let y1 = ((cy + 1) * CHUNK).min(cubes_y);
-                    let z1 = ((cz + 1) * CHUNK).min(cubes_z);
+                    let x1 = (cx + 1) * CHUNK as isize;
+                    let y1 = (cy + 1) * CHUNK as isize;
+                    let z1 = (cz + 1) * CHUNK as isize;
 
                     let wx0 = x0 as f32 / fx - 0.5;
                     let wy0 = y0 as f32 / fy - 0.5;
@@ -1139,6 +1169,24 @@ impl ScalarFieldMesher {
             return;
         }
 
+        fn floor_div(a: isize, b: isize) -> isize {
+            debug_assert!(b > 0);
+            if a >= 0 {
+                a / b
+            } else {
+                -((-a + b - 1) / b)
+            }
+        }
+
+        fn imod(a: isize, m: usize) -> usize {
+            let m = m as isize;
+            let mut r = a % m;
+            if r < 0 {
+                r += m;
+            }
+            r as usize
+        }
+
         let lerp_t = lerp_t.max(0.0).min(1.0);
 
         let cubes_x = self.nx.saturating_sub(1);
@@ -1156,7 +1204,7 @@ impl ScalarFieldMesher {
         let rad = radius.max(0.0);
         let rad2 = rad * rad;
 
-        // Camera in cube coordinates.
+        // Camera in cube coordinates (can be unbounded in global space).
         let cam_ix = (cam_x + 0.5) * fx;
         let cam_iy = (cam_y + 0.5) * fy;
         let cam_iz = (cam_z + 0.5) * fz;
@@ -1165,20 +1213,20 @@ impl ScalarFieldMesher {
         let ry = rad * fy;
         let rz = rad * fz;
 
-        let min_x = (cam_ix - rx).floor().max(0.0) as usize;
-        let min_y = (cam_iy - ry).floor().max(0.0) as usize;
-        let min_z = (cam_iz - rz).floor().max(0.0) as usize;
+        let min_x = (cam_ix - rx).floor() as isize;
+        let min_y = (cam_iy - ry).floor() as isize;
+        let min_z = (cam_iz - rz).floor() as isize;
 
-        let max_x = (cam_ix + rx).ceil().min((cubes_x - 1) as f32) as usize;
-        let max_y = (cam_iy + ry).ceil().min((cubes_y - 1) as f32) as usize;
-        let max_z = (cam_iz + rz).ceil().min((cubes_z - 1) as f32) as usize;
+        let max_x = (cam_ix + rx).ceil() as isize;
+        let max_y = (cam_iy + ry).ceil() as isize;
+        let max_z = (cam_iz + rz).ceil() as isize;
 
-        let min_cx = min_x / CHUNK;
-        let min_cy = min_y / CHUNK;
-        let min_cz = min_z / CHUNK;
-        let max_cx = max_x / CHUNK;
-        let max_cy = max_y / CHUNK;
-        let max_cz = max_z / CHUNK;
+        let min_cx = floor_div(min_x, CHUNK as isize);
+        let min_cy = floor_div(min_y, CHUNK as isize);
+        let min_cz = floor_div(min_z, CHUNK as isize);
+        let max_cx = floor_div(max_x, CHUNK as isize);
+        let max_cy = floor_div(max_y, CHUNK as isize);
+        let max_cz = floor_div(max_z, CHUNK as isize);
 
         let color = [r, g, b, a];
 
@@ -1200,7 +1248,10 @@ impl ScalarFieldMesher {
         for cz in min_cz..=max_cz {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
-                    let ci = self.chunk_index(cx, cy, cz);
+                    let cxw = imod(cx, self.chunk_nx);
+                    let cyw = imod(cy, self.chunk_ny);
+                    let czw = imod(cz, self.chunk_nz);
+                    let ci = cxw + self.chunk_nx * (cyw + self.chunk_ny * czw);
 
                     // Conservative bounds for the interpolated field.
                     let cmin = self.chunk_min_prev[ci].min(self.chunk_min_next[ci]);
@@ -1212,13 +1263,13 @@ impl ScalarFieldMesher {
                         continue;
                     }
 
-                    let x0 = cx * CHUNK;
-                    let y0 = cy * CHUNK;
-                    let z0 = cz * CHUNK;
+                    let x0 = cx * CHUNK as isize;
+                    let y0 = cy * CHUNK as isize;
+                    let z0 = cz * CHUNK as isize;
 
-                    let x1 = ((cx + 1) * CHUNK).min(cubes_x);
-                    let y1 = ((cy + 1) * CHUNK).min(cubes_y);
-                    let z1 = ((cz + 1) * CHUNK).min(cubes_z);
+                    let x1 = (cx + 1) * CHUNK as isize;
+                    let y1 = (cy + 1) * CHUNK as isize;
+                    let z1 = (cz + 1) * CHUNK as isize;
 
                     let wx0 = x0 as f32 / fx - 0.5;
                     let wy0 = y0 as f32 / fy - 0.5;

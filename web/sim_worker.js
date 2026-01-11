@@ -7,7 +7,7 @@ const TIMING_LAST_PUBLISH_MS = 0;
 const TIMING_PERIOD_MS = 1;
 
 const DEFAULT_DIMS = 192;
-const DEFAULT_PERIOD_MS = 500;
+const DEFAULT_PERIOD_MS = 200;
 
 let wasm;
 let sim;
@@ -30,7 +30,8 @@ let simConfig = {
   strategyId: "gray_scott",
   params: { du: 0.16, dv: 0.08, feed: 0.037, kill: 0.06 },
   dt: 0.1,
-  seeding: { type: "perlin", frequency: 6.0, octaves: 4, v_bias: 0.0, v_amp: 1.0 },
+  ticksPerSecond: 5,
+  seeding: { type: "classic", noiseAmp: 0.01, cubeCount: 20, cubeSize01: 0.05, u: 0.5, v: 0.25 },
 };
 
 let stepTimer = null;
@@ -113,6 +114,7 @@ function mergeSimConfig(update) {
   if (typeof update.strategyId === "string") simConfig.strategyId = update.strategyId;
 
   if (typeof update.dt === "number") simConfig.dt = update.dt;
+  if (typeof update.ticksPerSecond === "number") simConfig.ticksPerSecond = update.ticksPerSecond;
 
   if (update.params && typeof update.params === "object") {
     simConfig.params = {
@@ -126,6 +128,80 @@ function mergeSimConfig(update) {
       ...simConfig.seeding,
       ...update.seeding,
     };
+  }
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function makeSeededRng(seed) {
+  // Simple deterministic LCG (matches the style used in the Rust codebase).
+  let state = (seed ^ 0x9e3779b9) >>> 0;
+  return {
+    nextFloat() {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 2 ** 32;
+    },
+  };
+}
+
+function seedClassic(
+  sim,
+  dims,
+  seed,
+  { noiseAmp = 0.01, cubeCount = 20, cubeSize01 = 0.05, u = 0.5, v = 1.0 } = {},
+) {
+  const vPtr = sim.v_ptr();
+  const vLen = sim.v_len();
+  const vView = new Float32Array(wasm.memory.buffer, vPtr, vLen);
+
+  // If the WASM build exposes U accessors, seed U + V together.
+  const hasU = typeof sim.u_ptr === "function" && typeof sim.u_len === "function";
+  const uView = hasU ? new Float32Array(wasm.memory.buffer, sim.u_ptr(), sim.u_len()) : null;
+
+  // Base state: U=1, V=0 everywhere.
+  vView.fill(0);
+  if (uView) uView.fill(1);
+
+  const rng = makeSeededRng(seed);
+  const amp = Number(noiseAmp) || 0;
+
+  if (amp > 0) {
+    for (let i = 0; i < vView.length; i++) {
+      const nu = (rng.nextFloat() * 2 - 1) * amp;
+      const nv = (rng.nextFloat() * 2 - 1) * amp;
+
+      if (uView) uView[i] = clamp01(uView[i] + nu);
+      vView[i] = clamp01(vView[i] + nv);
+    }
+  }
+
+  // Random cube perturbations.
+  const cubeSize = Math.max(1, Math.floor(dims * Math.max(0, Math.min(1, cubeSize01))));
+  const uu = clamp01(Number(u) || 0);
+  const vv = clamp01(Number(v) || 0);
+  const count = Math.max(0, Math.min(1000, Math.trunc(cubeCount)));
+
+  for (let n = 0; n < count; n++) {
+    const x0 = Math.floor(rng.nextFloat() * (dims - cubeSize));
+    const y0 = Math.floor(rng.nextFloat() * (dims - cubeSize));
+    const z0 = Math.floor(rng.nextFloat() * (dims - cubeSize));
+
+    const x1 = x0 + cubeSize;
+    const y1 = y0 + cubeSize;
+    const z1 = z0 + cubeSize;
+
+    for (let z = z0; z < z1; z++) {
+      for (let y = y0; y < y1; y++) {
+        const base = dims * (y + dims * z);
+        for (let x = x0; x < x1; x++) {
+          const i = base + x;
+          if (uView) uView[i] = uu;
+          vView[i] = vv;
+        }
+      }
+    }
   }
 }
 
@@ -167,6 +243,8 @@ async function restartSimulation() {
       Number(seeding.v_bias ?? 0.0),
       Number(seeding.v_amp ?? 1.0),
     );
+  } else if (seeding.type === "classic") {
+    seedClassic(sim, dims, currentSeed, seeding);
   } else {
     throw new Error(`unknown seeding type: ${String(seeding.type)}`);
   }
@@ -185,13 +263,39 @@ async function restartSimulation() {
   scheduleNextStep();
 }
 
+function clampTicksPerSecond(tps) {
+  if (!Number.isFinite(tps)) return 5;
+  return Math.max(1, Math.min(30, Math.trunc(tps)));
+}
+
+function applyTicksPerSecond(tps) {
+  const ticksPerSecond = clampTicksPerSecond(tps);
+  simConfig.ticksPerSecond = ticksPerSecond;
+  periodMs = Math.max(1, Math.round(1000 / ticksPerSecond));
+
+  if (timingI64) {
+    Atomics.store(timingI64, TIMING_PERIOD_MS, BigInt(periodMs));
+  }
+
+  scheduleNextStep();
+}
+
 function applyLiveConfigUpdate(update) {
   if (!sim) return false;
+
+  let changed = false;
+
   if (typeof update.dt === "number") {
     sim.set_dt(Number(simConfig.dt));
-    return true;
+    changed = true;
   }
-  return false;
+
+  if (typeof update.ticksPerSecond === "number") {
+    applyTicksPerSecond(update.ticksPerSecond);
+    changed = true;
+  }
+
+  return changed;
 }
 
 self.onmessage = (e) => {
@@ -224,6 +328,12 @@ self.onmessage = (e) => {
     currentSeed = Number.isFinite(msg.seed) ? (Math.trunc(msg.seed) >>> 0) : 1337;
     if (msg.simConfig) mergeSimConfig(msg.simConfig);
 
+    // Keep `periodMs` consistent with config (default: 5 ticks/sec).
+    if (Number.isFinite(simConfig.ticksPerSecond)) {
+      periodMs = Math.max(1, Math.round(1000 / clampTicksPerSecond(simConfig.ticksPerSecond)));
+      if (timingI64) Atomics.store(timingI64, TIMING_PERIOD_MS, BigInt(periodMs));
+    }
+
     void restartSimulation().catch((err) => {
       self.postMessage({ type: "error", message: String(err?.stack || err) });
     });
@@ -251,7 +361,6 @@ self.onmessage = (e) => {
       return;
     }
 
-    // For now, `dt` is the only supported live update.
     applyLiveConfigUpdate(update);
   }
 };

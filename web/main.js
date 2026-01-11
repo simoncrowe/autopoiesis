@@ -2,6 +2,7 @@ const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
 const seedInput = document.querySelector("#seed");
 const simStrategySelect = document.querySelector("#simStrategy");
+const simInitSelect = document.querySelector("#simInit");
 const simParamsEl = document.querySelector("#simParams");
 const volumeThresholdInput = document.querySelector("#volumeThreshold");
 const viewRadiusInput = document.querySelector("#viewRadius");
@@ -316,12 +317,12 @@ async function main() {
   const cam = new FlyCamera();
 
   let viewRadius = 0.35;
-  let volumeThreshold = 0.5;
+  let volumeThreshold = 0.25;
   let gradMagGain = 25.0;
   const meshColor = [0.15, 0.65, 0.9, 0.9];
 
   const fogColor = [0.04, 0.06, 0.08];
-  const fogDensity = 16.0;
+  const fogDensity = 12.0;
 
   const gpuMesh = createMeshGpu(gl);
 
@@ -370,7 +371,6 @@ async function main() {
   }
 
   const dims = 192;
-  const periodMs = 500;
 
   const simStrategies = {
     gray_scott: {
@@ -403,8 +403,8 @@ async function main() {
           label: "Feed rate (U replenishment)",
           min: 0,
           max: 0.1,
-          step: 0.001,
-          defaultValue: 0.037,
+          step: 0.0001,
+          defaultValue: 0.0367,
           requiresRestart: true,
         },
         {
@@ -413,8 +413,8 @@ async function main() {
           label: "Kill rate (V removal)",
           min: 0,
           max: 0.1,
-          step: 0.001,
-          defaultValue: 0.06,
+          step: 0.0001,
+          defaultValue: 0.0649,
           requiresRestart: true,
         },
         {
@@ -427,14 +427,36 @@ async function main() {
           defaultValue: 0.1,
           requiresRestart: false,
         },
+        {
+          key: "ticksPerSecond",
+          path: ["ticksPerSecond"],
+          label: "Simulation ticks per second",
+          min: 1,
+          max: 30,
+          step: 1,
+          defaultValue: 5,
+          requiresRestart: false,
+        },
       ],
-      seeding: {
-        type: "perlin",
-        frequency: 6.0,
-        octaves: 4,
-        v_bias: 0.0,
-        v_amp: 1.0,
-      },
+      seedings: [
+        {
+          id: "classic",
+          name: "Random cubes + noise (long-lived)",
+          config: {
+            type: "classic",
+            noiseAmp: 0.01,
+            cubeCount: 20,
+            cubeSize01: 0.05,
+            u: 0.5,
+            v: 0.25,
+          },
+        },
+        {
+          id: "perlin",
+          name: "Perlin noise",
+          config: { type: "perlin", frequency: 6.0, octaves: 4, v_bias: 0.0, v_amp: 1.0 },
+        },
+      ],
     },
   };
 
@@ -442,7 +464,8 @@ async function main() {
     strategyId: "gray_scott",
     params: {},
     dt: 0.1,
-    seeding: simStrategies.gray_scott.seeding,
+    ticksPerSecond: 5,
+    seeding: simStrategies.gray_scott.seedings[0].config,
   };
 
   resetSimConfigForStrategy(simConfig.strategyId);
@@ -510,6 +533,9 @@ async function main() {
     // timingI64[0] = last publish Date.now() (ms)
     // timingI64[1] = target period (ms)
     const timing = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 2);
+    const ticksPerSecond = Math.max(1, Math.min(30, Math.trunc(simConfig.ticksPerSecond ?? 5)));
+    const periodMs = Math.max(1, Math.round(1000 / ticksPerSecond));
+
     const timingI64 = new BigInt64Array(timing);
     timingI64[0] = BigInt(Date.now());
     timingI64[1] = BigInt(periodMs);
@@ -615,10 +641,12 @@ async function main() {
         simConfig.params[p.path[1]] = p.defaultValue;
       } else if (p.path.length === 1 && p.path[0] === "dt") {
         simConfig.dt = p.defaultValue;
+      } else if (p.path.length === 1 && p.path[0] === "ticksPerSecond") {
+        simConfig.ticksPerSecond = p.defaultValue;
       }
     }
 
-    simConfig.seeding = strategy.seeding;
+    simConfig.seeding = strategy.seedings?.[0]?.config ?? simConfig.seeding;
   }
 
   function getSimConfigValue(path) {
@@ -688,6 +716,32 @@ async function main() {
     }
   }
 
+  function renderSimInitSelect() {
+    if (!simInitSelect) return;
+
+    const strategy = simStrategies[simConfig.strategyId];
+    simInitSelect.textContent = "";
+
+    for (const s of strategy.seedings ?? []) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.name;
+      simInitSelect.appendChild(opt);
+    }
+
+    const curType = simConfig.seeding?.type;
+    const selected = (strategy.seedings ?? []).find((s) => s.config.type === curType) ??
+      strategy.seedings?.[0];
+    if (selected) simInitSelect.value = selected.id;
+
+    simInitSelect.onchange = () => {
+      const next = (strategy.seedings ?? []).find((s) => s.id === simInitSelect.value);
+      if (!next) return;
+      simConfig.seeding = next.config;
+      simWorker?.postMessage({ type: "sim_config", config: { seeding: simConfig.seeding } });
+    };
+  }
+
   function renderSimStrategySelect() {
     if (!simStrategySelect) return;
 
@@ -702,15 +756,17 @@ async function main() {
 
     simStrategySelect.value = simConfig.strategyId;
 
-    simStrategySelect.addEventListener("change", () => {
+    simStrategySelect.onchange = () => {
       const nextId = simStrategySelect.value;
       resetSimConfigForStrategy(nextId);
+      renderSimInitSelect();
       renderSimParams();
       simWorker?.postMessage({ type: "sim_config", config: simConfig });
-    });
+    };
   }
 
   renderSimStrategySelect();
+  renderSimInitSelect();
   renderSimParams();
 
   if (volumeThresholdInput) volumeThresholdInput.value = volumeThreshold.toFixed(2);
@@ -784,6 +840,7 @@ async function main() {
 
     cam.pos = vec3Add(cam.pos, delta);
   }
+
 
   let lastT = performance.now();
   function render(tNow) {

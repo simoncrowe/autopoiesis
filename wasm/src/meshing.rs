@@ -103,25 +103,35 @@ fn wrap(v: isize, n: usize) -> usize {
     x as usize
 }
 
+fn idx_wrap(nx: usize, ny: usize, nz: usize, x: isize, y: isize, z: isize) -> usize {
+    let xw = wrap(x, nx);
+    let yw = wrap(y, ny);
+    let zw = wrap(z, nz);
+    idx(nx, ny, xw, yw, zw)
+}
+
 fn gradient(
     scalars: &[f32],
     nx: usize,
     ny: usize,
     nz: usize,
-    x: usize,
-    y: usize,
-    z: usize,
+    x: isize,
+    y: isize,
+    z: isize,
 ) -> [f32; 3] {
-    let xm = wrap(x as isize - 1, nx);
-    let xp = wrap(x as isize + 1, nx);
-    let ym = wrap(y as isize - 1, ny);
-    let yp = wrap(y as isize + 1, ny);
-    let zm = wrap(z as isize - 1, nz);
-    let zp = wrap(z as isize + 1, nz);
+    let xm = x - 1;
+    let xp = x + 1;
+    let ym = y - 1;
+    let yp = y + 1;
+    let zm = z - 1;
+    let zp = z + 1;
 
-    let dx = (scalars[idx(nx, ny, xp, y, z)] - scalars[idx(nx, ny, xm, y, z)]) * 0.5;
-    let dy = (scalars[idx(nx, ny, x, yp, z)] - scalars[idx(nx, ny, x, ym, z)]) * 0.5;
-    let dz = (scalars[idx(nx, ny, x, y, zp)] - scalars[idx(nx, ny, x, y, zm)]) * 0.5;
+    let dx =
+        (scalars[idx_wrap(nx, ny, nz, xp, y, z)] - scalars[idx_wrap(nx, ny, nz, xm, y, z)]) * 0.5;
+    let dy =
+        (scalars[idx_wrap(nx, ny, nz, x, yp, z)] - scalars[idx_wrap(nx, ny, nz, x, ym, z)]) * 0.5;
+    let dz =
+        (scalars[idx_wrap(nx, ny, nz, x, y, zp)] - scalars[idx_wrap(nx, ny, nz, x, y, zm)]) * 0.5;
     [dx, dy, dz]
 }
 
@@ -138,49 +148,49 @@ fn gradient_lerp(
     nx: usize,
     ny: usize,
     nz: usize,
-    x: usize,
-    y: usize,
-    z: usize,
+    x: isize,
+    y: isize,
+    z: isize,
 ) -> [f32; 3] {
-    let x_minus = wrap(x as isize - 1, nx);
-    let x_plus = wrap(x as isize + 1, nx);
-    let y_minus = wrap(y as isize - 1, ny);
-    let y_plus = wrap(y as isize + 1, ny);
-    let z_minus = wrap(z as isize - 1, nz);
-    let z_plus = wrap(z as isize + 1, nz);
+    let x_minus = x - 1;
+    let x_plus = x + 1;
+    let y_minus = y - 1;
+    let y_plus = y + 1;
+    let z_minus = z - 1;
+    let z_plus = z + 1;
 
     let dx = (sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x_plus, y, z),
+        idx_wrap(nx, ny, nz, x_plus, y, z),
     ) - sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x_minus, y, z),
+        idx_wrap(nx, ny, nz, x_minus, y, z),
     )) * 0.5;
     let dy = (sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x, y_plus, z),
+        idx_wrap(nx, ny, nz, x, y_plus, z),
     ) - sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x, y_minus, z),
+        idx_wrap(nx, ny, nz, x, y_minus, z),
     )) * 0.5;
     let dz = (sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x, y, z_plus),
+        idx_wrap(nx, ny, nz, x, y, z_plus),
     ) - sample_lerp(
         scalars_prev,
         scalars_next,
         lerp_t,
-        idx(nx, ny, x, y, z_minus),
+        idx_wrap(nx, ny, nz, x, y, z_minus),
     )) * 0.5;
     [dx, dy, dz]
 }
@@ -309,12 +319,12 @@ pub fn mesh_region_append(
     iso: f32,
     color: [f32; 4],
     out: &mut MeshBuffers,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    z0: usize,
-    z1: usize,
+    x0: isize,
+    x1: isize,
+    y0: isize,
+    y1: isize,
+    z0: isize,
+    z1: isize,
     stride: usize,
 ) {
     if nx < 2 || ny < 2 || nz < 2 {
@@ -328,13 +338,13 @@ pub fn mesh_region_append(
     let cubes_y = ny - 1;
     let cubes_z = nz - 1;
 
+    if cubes_x == 0 || cubes_y == 0 || cubes_z == 0 {
+        return;
+    }
+
     let fx = cubes_x as f32;
     let fy = cubes_y as f32;
     let fz = cubes_z as f32;
-
-    let x1 = x1.min(cubes_x);
-    let y1 = y1.min(cubes_y);
-    let z1 = z1.min(cubes_z);
 
     if x0 >= x1 || y0 >= y1 || z0 >= z1 {
         return;
@@ -349,20 +359,22 @@ pub fn mesh_region_append(
         [0, 4, 5, 6],
     ];
 
+    let stride_i = stride as isize;
+
     // We need x + stride <= x1 etc.
-    let x_stop = x1.saturating_sub(stride);
-    let y_stop = y1.saturating_sub(stride);
-    let z_stop = z1.saturating_sub(stride);
+    let x_stop = x1 - stride_i;
+    let y_stop = y1 - stride_i;
+    let z_stop = z1 - stride_i;
 
     let mut z = z0;
     while z <= z_stop {
-        let z1i = z + stride;
+        let z1i = z + stride_i;
         let mut y = y0;
         while y <= y_stop {
-            let y1i = y + stride;
+            let y1i = y + stride_i;
             let mut x = x0;
             while x <= x_stop {
-                let x1i = x + stride;
+                let x1i = x + stride_i;
 
                 let x0w = x as f32 / fx - 0.5;
                 let y0w = y as f32 / fy - 0.5;
@@ -383,14 +395,14 @@ pub fn mesh_region_append(
                 ];
 
                 let corner_indices = [
-                    idx(nx, ny, x, y, z),
-                    idx(nx, ny, x1i, y, z),
-                    idx(nx, ny, x1i, y1i, z),
-                    idx(nx, ny, x, y1i, z),
-                    idx(nx, ny, x, y, z1i),
-                    idx(nx, ny, x1i, y, z1i),
-                    idx(nx, ny, x1i, y1i, z1i),
-                    idx(nx, ny, x, y1i, z1i),
+                    idx_wrap(nx, ny, nz, x, y, z),
+                    idx_wrap(nx, ny, nz, x1i, y, z),
+                    idx_wrap(nx, ny, nz, x1i, y1i, z),
+                    idx_wrap(nx, ny, nz, x, y1i, z),
+                    idx_wrap(nx, ny, nz, x, y, z1i),
+                    idx_wrap(nx, ny, nz, x1i, y, z1i),
+                    idx_wrap(nx, ny, nz, x1i, y1i, z1i),
+                    idx_wrap(nx, ny, nz, x, y1i, z1i),
                 ];
 
                 let corner_values = [
@@ -449,11 +461,11 @@ pub fn mesh_region_append(
                     }
                 }
 
-                x += stride;
+                x += stride_i;
             }
-            y += stride;
+            y += stride_i;
         }
-        z += stride;
+        z += stride_i;
     }
 }
 
@@ -467,12 +479,12 @@ pub fn mesh_region_append_lerp(
     iso: f32,
     color: [f32; 4],
     out: &mut MeshBuffers,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    z0: usize,
-    z1: usize,
+    x0: isize,
+    x1: isize,
+    y0: isize,
+    y1: isize,
+    z0: isize,
+    z1: isize,
     stride: usize,
 ) {
     if nx < 2 || ny < 2 || nz < 2 {
@@ -489,13 +501,13 @@ pub fn mesh_region_append_lerp(
     let cubes_y = ny - 1;
     let cubes_z = nz - 1;
 
+    if cubes_x == 0 || cubes_y == 0 || cubes_z == 0 {
+        return;
+    }
+
     let fx = cubes_x as f32;
     let fy = cubes_y as f32;
     let fz = cubes_z as f32;
-
-    let x1 = x1.min(cubes_x);
-    let y1 = y1.min(cubes_y);
-    let z1 = z1.min(cubes_z);
 
     if x0 >= x1 || y0 >= y1 || z0 >= z1 {
         return;
@@ -510,20 +522,22 @@ pub fn mesh_region_append_lerp(
         [0, 4, 5, 6],
     ];
 
+    let stride_i = stride as isize;
+
     // We need x + stride <= x1 etc.
-    let x_stop = x1.saturating_sub(stride);
-    let y_stop = y1.saturating_sub(stride);
-    let z_stop = z1.saturating_sub(stride);
+    let x_stop = x1 - stride_i;
+    let y_stop = y1 - stride_i;
+    let z_stop = z1 - stride_i;
 
     let mut z = z0;
     while z <= z_stop {
-        let z1i = z + stride;
+        let z1i = z + stride_i;
         let mut y = y0;
         while y <= y_stop {
-            let y1i = y + stride;
+            let y1i = y + stride_i;
             let mut x = x0;
             while x <= x_stop {
-                let x1i = x + stride;
+                let x1i = x + stride_i;
 
                 let x0w = x as f32 / fx - 0.5;
                 let y0w = y as f32 / fy - 0.5;
@@ -544,14 +558,14 @@ pub fn mesh_region_append_lerp(
                 ];
 
                 let corner_indices = [
-                    idx(nx, ny, x, y, z),
-                    idx(nx, ny, x1i, y, z),
-                    idx(nx, ny, x1i, y1i, z),
-                    idx(nx, ny, x, y1i, z),
-                    idx(nx, ny, x, y, z1i),
-                    idx(nx, ny, x1i, y, z1i),
-                    idx(nx, ny, x1i, y1i, z1i),
-                    idx(nx, ny, x, y1i, z1i),
+                    idx_wrap(nx, ny, nz, x, y, z),
+                    idx_wrap(nx, ny, nz, x1i, y, z),
+                    idx_wrap(nx, ny, nz, x1i, y1i, z),
+                    idx_wrap(nx, ny, nz, x, y1i, z),
+                    idx_wrap(nx, ny, nz, x, y, z1i),
+                    idx_wrap(nx, ny, nz, x1i, y, z1i),
+                    idx_wrap(nx, ny, nz, x1i, y1i, z1i),
+                    idx_wrap(nx, ny, nz, x, y1i, z1i),
                 ];
 
                 let corner_values = [
@@ -620,11 +634,11 @@ pub fn mesh_region_append_lerp(
                     }
                 }
 
-                x += stride;
+                x += stride_i;
             }
-            y += stride;
+            y += stride_i;
         }
-        z += stride;
+        z += stride_i;
     }
 }
 
@@ -647,11 +661,11 @@ pub fn generate_isosurface_mesh(
         color,
         out,
         0,
-        nx - 1,
+        (nx - 1) as isize,
         0,
-        ny - 1,
+        (ny - 1) as isize,
         0,
-        nz - 1,
+        (nz - 1) as isize,
         1,
     );
 }
