@@ -316,13 +316,13 @@ async function main() {
 
   const cam = new FlyCamera();
 
-  let viewRadius = 0.5;
+  let viewRadius = 1;
   let volumeThreshold = 0.25;
-  let gradMagGain = 25.0;
+  let gradMagGain = 12.0;
   const meshColor = [0.15, 0.65, 0.9, 0.75];
 
   const fogColor = [0.04, 0.06, 0.14];
-  const fogDensity = 10.0;
+  const fogDensity = 8.0;
 
   const gpuMesh = createMeshGpu(gl);
 

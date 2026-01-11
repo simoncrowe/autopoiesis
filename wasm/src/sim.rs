@@ -204,12 +204,9 @@ pub struct Simulation {
     chunk_v_min: Vec<f32>,
     chunk_v_max: Vec<f32>,
 
-    // Updating chunk min/max every step costs an additional full pass over `v`.
-    // For performance, we recompute periodically and use a conservative fallback
-    // in between (so meshing never incorrectly culls away surfaces).
-    chunk_ranges_every: u32,
-    chunk_ranges_step: u32,
-
+    // Chunk min/max are used for iso culling in meshing.
+    // For performance, we recompute them on-demand (e.g. when publishing a snapshot),
+    // not every simulation step.
     u: Vec<f32>,
     v: Vec<f32>,
     u2: Vec<f32>,
@@ -265,9 +262,6 @@ impl Simulation {
             chunk_nz,
             chunk_v_min: vec![f32::INFINITY; chunk_total],
             chunk_v_max: vec![f32::NEG_INFINITY; chunk_total],
-
-            chunk_ranges_every: 4,
-            chunk_ranges_step: 0,
 
             u: vec![1.0; n],
             v: vec![0.0; n],
@@ -441,7 +435,7 @@ impl Simulation {
         }
     }
 
-    fn recompute_chunk_ranges_from_v(&mut self) {
+    pub fn recompute_chunk_ranges_from_v(&mut self) {
         let cubes_x = self.nx.saturating_sub(1);
         let cubes_y = self.ny.saturating_sub(1);
         let cubes_z = self.nz.saturating_sub(1);
@@ -556,18 +550,6 @@ impl Simulation {
 
         std::mem::swap(&mut self.u, &mut self.u2);
         std::mem::swap(&mut self.v, &mut self.v2);
-
-        // Chunk min/max are used for iso culling in meshing.
-        // Recomputing them every step is expensive (another full pass over the volume).
-        // We can safely disable iso culling between recomputes by setting a
-        // conservative range (still finite, so the mesher won't treat it as invalid).
-        self.chunk_ranges_step = self.chunk_ranges_step.wrapping_add(1);
-        if self.chunk_ranges_step % self.chunk_ranges_every == 0 {
-            self.recompute_chunk_ranges_from_v();
-        } else {
-            self.chunk_v_min.fill(f32::MIN);
-            self.chunk_v_max.fill(f32::MAX);
-        }
     }
 
     pub fn v_min(&self) -> f32 {

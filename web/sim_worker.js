@@ -44,6 +44,7 @@ let simConfig = {
 // Run the simulation as fast as possible, but only publish snapshots at `periodMs`.
 // Meshing interpolates between the most recent two published snapshots.
 const STEP_TIME_SLICE_MS = 12;
+const STEP_BATCH = 8;
 
 let loopTimer = null;
 let isRunning = false;
@@ -57,6 +58,12 @@ let lastRateAt = 0;
 
 function publishSnapshot(nowMs) {
   if (!sim || !ctrlI32 || !vViews || !chunkMinViews || !chunkMaxViews) return;
+
+  // Keep the chunk min/max consistent with the scalar field we’re publishing.
+  // This is used for meshing iso-culling.
+  if (typeof sim.recompute_chunk_ranges_from_v === "function") {
+    sim.recompute_chunk_ranges_from_v();
+  }
 
   const front = Atomics.load(ctrlI32, CTRL_FRONT_INDEX);
   const back = front ^ 1;
@@ -114,15 +121,17 @@ function loop() {
   const sliceStart = performance.now();
 
   while (performance.now() - sliceStart < STEP_TIME_SLICE_MS) {
-    sim.step(1);
-    totalSteps += 1;
-    stepsWindow += 1;
-
     const nowMs = Date.now();
     if (nowMs >= nextPublishMs) {
       publishSnapshot(nowMs);
       nextPublishMs = nowMs + periodMs;
+      continue;
     }
+
+    // Batch steps to reduce JS<->WASM call overhead.
+    sim.step(STEP_BATCH);
+    totalSteps += STEP_BATCH;
+    stepsWindow += STEP_BATCH;
   }
 
   updateStepsPerSecondStats();
