@@ -5,6 +5,7 @@ const simStrategySelect = document.querySelector("#simStrategy");
 const simParamsEl = document.querySelector("#simParams");
 const volumeThresholdInput = document.querySelector("#volumeThreshold");
 const viewRadiusInput = document.querySelector("#viewRadius");
+const gradMagGainInput = document.querySelector("#gradMagGain");
 const restartBtn = document.querySelector("#restart");
 
 function normalizeSeed(value) {
@@ -316,10 +317,11 @@ async function main() {
 
   let viewRadius = 0.35;
   let volumeThreshold = 0.5;
+  let gradMagGain = 6.0;
   const meshColor = [0.15, 0.65, 0.9, 0.9];
 
   const fogColor = [0.04, 0.06, 0.08];
-  const fogDensity = 4.0;
+  const fogDensity = 16.0;
 
   const gpuMesh = createMeshGpu(gl);
 
@@ -712,6 +714,7 @@ async function main() {
 
   if (volumeThresholdInput) volumeThresholdInput.value = volumeThreshold.toFixed(2);
   if (viewRadiusInput) viewRadiusInput.value = viewRadius.toFixed(2);
+  if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
 
   volumeThresholdInput?.addEventListener("input", () => {
     volumeThreshold = parseClampedFloat(volumeThresholdInput.value, volumeThreshold, 0, 1);
@@ -727,6 +730,14 @@ async function main() {
   viewRadiusInput?.addEventListener("change", () => {
     viewRadius = parseClampedFloat(viewRadiusInput.value, viewRadius, 0.05, 5);
     viewRadiusInput.value = viewRadius.toFixed(2);
+  });
+
+  gradMagGainInput?.addEventListener("input", () => {
+    gradMagGain = parseClampedFloat(gradMagGainInput.value, gradMagGain, 0, 50);
+  });
+  gradMagGainInput?.addEventListener("change", () => {
+    gradMagGain = parseClampedFloat(gradMagGainInput.value, gradMagGain, 0, 50);
+    gradMagGainInput.value = String(gradMagGain);
   });
 
   restartBtn?.addEventListener("click", () => {
@@ -754,6 +765,7 @@ async function main() {
       radius: viewRadius,
       iso: volumeThreshold,
       color: meshColor,
+      gradMagGain,
     });
   }
 

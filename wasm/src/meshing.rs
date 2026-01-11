@@ -7,6 +7,41 @@ pub struct MeshBuffers {
     pub indices: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
+struct ColorRamp {
+    a: [f32; 3],
+    b: [f32; 3],
+}
+
+impl ColorRamp {
+    fn sample(&self, t: f32) -> [f32; 3] {
+        let tt = t.max(0.0).min(1.0);
+        [
+            lerp(self.a[0], self.b[0], tt),
+            lerp(self.a[1], self.b[1], tt),
+            lerp(self.a[2], self.b[2], tt),
+        ]
+    }
+}
+
+const RAMP_RED_TO_BLUE: ColorRamp = ColorRamp {
+    a: [1.0, 0.0, 0.0],
+    b: [0.0, 0.0, 1.0],
+};
+
+fn grad_mag_to_ramp_t(grad_mag: f32) -> f32 {
+    // Map gradient magnitudes into [0,1] with a smooth curve.
+    // The constant is a tuning knob; higher values push more colors towards blue.
+    let g = grad_mag.max(0.0);
+    1.0 - (-g * 6.0).exp()
+}
+
+fn color_from_grad_mag(grad_mag: f32, alpha: f32, ramp: ColorRamp) -> [f32; 4] {
+    let t = grad_mag_to_ramp_t(grad_mag);
+    let rgb = ramp.sample(t);
+    [rgb[0], rgb[1], rgb[2], alpha]
+}
+
 impl MeshBuffers {
     pub fn new() -> Self {
         Self {
@@ -32,10 +67,18 @@ impl MeshBuffers {
         vertex_index
     }
 
-    fn push_triangle(&mut self, a: Vertex, b: Vertex, c: Vertex, color: [f32; 4]) {
-        let ia = self.push_vertex(a.position, a.normal, color);
-        let ib = self.push_vertex(b.position, b.normal, color);
-        let ic = self.push_vertex(c.position, c.normal, color);
+    fn push_triangle(
+        &mut self,
+        a: Vertex,
+        b: Vertex,
+        c: Vertex,
+        ca: [f32; 4],
+        cb: [f32; 4],
+        cc: [f32; 4],
+    ) {
+        let ia = self.push_vertex(a.position, a.normal, ca);
+        let ib = self.push_vertex(b.position, b.normal, cb);
+        let ic = self.push_vertex(c.position, c.normal, cc);
         self.indices.extend_from_slice(&[ia, ib, ic]);
     }
 }
@@ -44,6 +87,7 @@ impl MeshBuffers {
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+    grad_mag: f32,
 }
 
 fn idx(nx: usize, ny: usize, x: usize, y: usize, z: usize) -> usize {
@@ -167,8 +211,13 @@ fn interp_vertex(
         lerp(n0[1], n1[1], t),
         lerp(n0[2], n1[2], t),
     ];
+    let grad_mag = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
 
-    Vertex { position, normal }
+    Vertex {
+        position,
+        normal,
+        grad_mag,
+    }
 }
 
 fn polygonise_tetra(
@@ -204,7 +253,12 @@ fn polygonise_tetra(
             let a = interp_vertex(iso, p[i], p[o0], v[i], v[o0], n[i], n[o0]);
             let b = interp_vertex(iso, p[i], p[o1], v[i], v[o1], n[i], n[o1]);
             let c = interp_vertex(iso, p[i], p[o2], v[i], v[o2], n[i], n[o2]);
-            out.push_triangle(a, b, c, col);
+
+            let alpha = col[3];
+            let ca = color_from_grad_mag(a.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let cb = color_from_grad_mag(b.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let cc = color_from_grad_mag(c.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            out.push_triangle(a, b, c, ca, cb, cc);
         }
         3 => {
             let o = outside[0];
@@ -214,7 +268,12 @@ fn polygonise_tetra(
             let a = interp_vertex(iso, p[o], p[i0], v[o], v[i0], n[o], n[i0]);
             let b = interp_vertex(iso, p[o], p[i1], v[o], v[i1], n[o], n[i1]);
             let c = interp_vertex(iso, p[o], p[i2], v[o], v[i2], n[o], n[i2]);
-            out.push_triangle(a, b, c, col);
+
+            let alpha = col[3];
+            let ca = color_from_grad_mag(a.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let cb = color_from_grad_mag(b.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let cc = color_from_grad_mag(c.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            out.push_triangle(a, b, c, ca, cb, cc);
         }
         2 => {
             let i0 = inside[0];
@@ -227,9 +286,16 @@ fn polygonise_tetra(
             let p2 = interp_vertex(iso, p[i1], p[o0], v[i1], v[o0], n[i1], n[o0]);
             let p3 = interp_vertex(iso, p[i1], p[o1], v[i1], v[o1], n[i1], n[o1]);
 
+            let alpha = col[3];
+
             // Quad split into two triangles.
-            out.push_triangle(p0, p2, p3, col);
-            out.push_triangle(p0, p3, p1, col);
+            let c0 = color_from_grad_mag(p0.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let c1 = color_from_grad_mag(p1.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let c2 = color_from_grad_mag(p2.grad_mag, alpha, RAMP_RED_TO_BLUE);
+            let c3 = color_from_grad_mag(p3.grad_mag, alpha, RAMP_RED_TO_BLUE);
+
+            out.push_triangle(p0, p2, p3, c0, c2, c3);
+            out.push_triangle(p0, p3, p1, c0, c3, c1);
         }
         _ => unreachable!(),
     }
