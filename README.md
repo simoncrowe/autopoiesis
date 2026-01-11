@@ -20,7 +20,7 @@ Serve the repo root (any static server works).
 
 Note: this project now uses `SharedArrayBuffer`, so the page must be `crossOriginIsolated` (COOP/COEP headers) and served from a secure context.
 
-- `caddy run`
+- `caddy start`
 
 Open:
 - `https://localhost:8080/web/`
