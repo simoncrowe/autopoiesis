@@ -1,0 +1,176 @@
+import init, { ScalarFieldMesher } from "../wasm/web/pkg/abiogenesis.js";
+
+const CTRL_EPOCH = 0;
+const CTRL_FRONT_INDEX = 1;
+
+const TIMING_LAST_PUBLISH_MS = 0;
+const TIMING_PERIOD_MS = 1;
+
+const DEFAULT_DIMS = 192;
+const MESH_INTERVAL_MS = 16;
+
+let wasm;
+let mesher;
+
+let ctrlI32;
+let vViews;
+let chunkMinViews;
+let chunkMaxViews;
+let timingI64;
+
+let camPos = [0, 0, 0.25];
+let viewRadius = 0.35;
+let iso = 0.5;
+let color = [0.15, 0.65, 0.9, 0.9];
+
+let lastEpoch = -1;
+let lastMeshAt = 0;
+let cameraDirty = true;
+
+function copyFloat32(ptr, len) {
+  return new Float32Array(wasm.memory.buffer, ptr, len).slice();
+}
+
+function copyU32(ptr, len) {
+  return new Uint32Array(wasm.memory.buffer, ptr, len).slice();
+}
+
+function lerpFactor() {
+  if (!timingI64) return 1;
+  const lastPublishMs = Number(Atomics.load(timingI64, TIMING_LAST_PUBLISH_MS) || 0n);
+  const periodMs = Number(Atomics.load(timingI64, TIMING_PERIOD_MS) || 0n);
+  if (!Number.isFinite(lastPublishMs) || !Number.isFinite(periodMs) || periodMs <= 0) return 1;
+  return Math.max(0, Math.min(1, (Date.now() - lastPublishMs) / periodMs));
+}
+
+function maybePushKeyframe() {
+  if (!ctrlI32 || !vViews || !chunkMinViews || !chunkMaxViews || !mesher) return false;
+
+  const epoch = Atomics.load(ctrlI32, CTRL_EPOCH);
+  if (epoch === lastEpoch) return false;
+  lastEpoch = epoch;
+
+  const front = Atomics.load(ctrlI32, CTRL_FRONT_INDEX);
+  mesher.push_keyframe_with_chunk_ranges(vViews[front], chunkMinViews[front], chunkMaxViews[front]);
+  return true;
+}
+
+function buildMesh() {
+  if (!mesher) return;
+
+  const now = performance.now();
+  if (lastMeshAt !== 0 && now - lastMeshAt < MESH_INTERVAL_MS) return;
+
+  const keyframeChanged = maybePushKeyframe();
+  const t = lerpFactor();
+
+  // If nothing changed and we’re at (or past) the end of the lerp window, skip.
+  if (!keyframeChanged && !cameraDirty && t >= 0.999) return;
+
+  lastMeshAt = now;
+  cameraDirty = false;
+
+  const t0 = performance.now();
+  mesher.generate_mesh_visible_lerp(
+    t,
+    camPos[0],
+    camPos[1],
+    camPos[2],
+    viewRadius,
+    iso,
+    color[0],
+    color[1],
+    color[2],
+    color[3],
+  );
+  const meshMs = performance.now() - t0;
+
+  const positions = copyFloat32(mesher.mesh_positions_ptr(), mesher.mesh_positions_len());
+  const normals = copyFloat32(mesher.mesh_normals_ptr(), mesher.mesh_normals_len());
+  const colors = copyFloat32(mesher.mesh_colors_ptr(), mesher.mesh_colors_len());
+  const indices = copyU32(mesher.mesh_indices_ptr(), mesher.mesh_indices_len());
+
+  self.postMessage(
+    {
+      type: "mesh",
+      positions: positions.buffer,
+      normals: normals.buffer,
+      colors: colors.buffer,
+      indices: indices.buffer,
+      indexCount: indices.length,
+      vertexCount: mesher.mesh_vertex_count(),
+      meshMs,
+      epoch: lastEpoch,
+    },
+    [positions.buffer, normals.buffer, colors.buffer, indices.buffer],
+  );
+}
+
+function loop() {
+  buildMesh();
+  setTimeout(loop, 0);
+}
+
+function handleCamera(msg) {
+  let changed = false;
+
+  if (Array.isArray(msg.pos) && msg.pos.length === 3) {
+    const next = [msg.pos[0], msg.pos[1], msg.pos[2]];
+    if (next[0] !== camPos[0] || next[1] !== camPos[1] || next[2] !== camPos[2]) {
+      camPos = next;
+      changed = true;
+    }
+  }
+
+  if (typeof msg.radius === "number" && msg.radius !== viewRadius) {
+    viewRadius = msg.radius;
+    changed = true;
+  }
+
+  if (typeof msg.iso === "number" && msg.iso !== iso) {
+    iso = msg.iso;
+    changed = true;
+  }
+
+  if (Array.isArray(msg.color) && msg.color.length === 4) {
+    const next = [msg.color[0], msg.color[1], msg.color[2], msg.color[3]];
+    if (next[0] !== color[0] || next[1] !== color[1] || next[2] !== color[2] || next[3] !== color[3]) {
+      color = next;
+      changed = true;
+    }
+  }
+
+  if (changed) cameraDirty = true;
+}
+
+self.onmessage = (e) => {
+  const msg = e.data;
+  if (!msg || typeof msg !== "object") return;
+
+  if (msg.type === "init") {
+    ctrlI32 = new Int32Array(msg.ctrl);
+
+    const vSabs = msg.vSabs;
+    const chunkMinSabs = msg.chunkMinSabs;
+    const chunkMaxSabs = msg.chunkMaxSabs;
+
+    vViews = [new Float32Array(vSabs[0]), new Float32Array(vSabs[1])];
+    chunkMinViews = [new Float32Array(chunkMinSabs[0]), new Float32Array(chunkMinSabs[1])];
+    chunkMaxViews = [new Float32Array(chunkMaxSabs[0]), new Float32Array(chunkMaxSabs[1])];
+    timingI64 = msg.timing ? new BigInt64Array(msg.timing) : null;
+    return;
+  }
+
+  if (msg.type === "camera") {
+    handleCamera(msg);
+  }
+};
+
+(async () => {
+  wasm = await init();
+  mesher = new ScalarFieldMesher(DEFAULT_DIMS, DEFAULT_DIMS, DEFAULT_DIMS);
+  self.postMessage({ type: "mesh_ready" });
+  loop();
+})().catch((err) => {
+  self.postMessage({ type: "error", message: String(err?.stack || err) });
+});
