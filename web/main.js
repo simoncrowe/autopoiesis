@@ -1,5 +1,13 @@
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
+const seedInput = document.querySelector("#seed");
+const restartBtn = document.querySelector("#restart");
+
+function normalizeSeed(value) {
+  const n = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(n)) return Date.now() >>> 0;
+  return n >>> 0;
+}
 
 function resizeCanvasToDisplaySize(c) {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -317,9 +325,17 @@ async function main() {
       document.exitPointerLock?.();
       return;
     }
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      return;
+    }
     keys.add(e.code);
   });
-  window.addEventListener("keyup", (e) => keys.delete(e.code));
+  window.addEventListener("keyup", (e) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      return;
+    }
+    keys.delete(e.code);
+  });
 
   canvas.addEventListener("click", async () => {
     if (document.pointerLockElement !== canvas) {
@@ -340,45 +356,171 @@ async function main() {
     cam.moveSpeed = Math.max(0.1, Math.min(8.0, cam.moveSpeed * (sign > 0 ? 0.9 : 1.1)));
   });
 
-  const worker = new Worker(new URL("./sim_worker.js", import.meta.url), { type: "module" });
+  if (!globalThis.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+    throw new Error(
+      "SharedArrayBuffer requires crossOriginIsolated (COOP/COEP headers).",
+    );
+  }
+
+  const dims = 192;
+  const periodMs = 500;
+
+  const n = dims * dims * dims;
+
+  let simWorker = null;
+  let meshWorker = null;
 
   let lastMeshMs = 0;
-  let lastStepsPerSec = 0;
-  let lastTotalSteps = 0;
-  let workerReady = false;
+  let lastMeshEpoch = 0;
+  let lastSimStepsPerSec = 0;
+  let lastSimTotalSteps = 0;
+  let meshReady = false;
 
-  worker.onmessage = (e) => {
-    const msg = e.data;
-    if (!msg || typeof msg !== "object") return;
+  function stopWorkers() {
+    simWorker?.terminate();
+    meshWorker?.terminate();
+    simWorker = null;
+    meshWorker = null;
+    meshReady = false;
+  }
 
-    if (msg.type === "ready") {
-      workerReady = true;
-      return;
-    }
+  function startWorkers(seed) {
+    stopWorkers();
 
-    if (msg.type === "mesh") {
-      uploadMeshFromBuffers(gl, gpuMesh, msg);
-      lastMeshMs = msg.meshMs || 0;
-      lastStepsPerSec = msg.stepsPerSec || 0;
-      lastTotalSteps = msg.totalSteps || 0;
-      return;
-    }
+    // Reset UI + mesh.
+    statsEl.textContent = "";
+    gpuMesh.indexCount = 0;
+    gpuMesh.vertexCount = 0;
+    lastMeshMs = 0;
+    lastMeshEpoch = 0;
+    lastSimStepsPerSec = 0;
+    lastSimTotalSteps = 0;
+    lastCamSendAt = 0;
 
-    if (msg.type === "error") {
-      console.error(msg.message);
-      statsEl.textContent = String(msg.message);
-    }
-  };
+    const vSabs = [
+      new SharedArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT),
+      new SharedArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT),
+    ];
+
+    // Must match `CHUNK` in `wasm/src/sim.rs`.
+    const chunkSize = 16;
+    const cubes = dims - 1;
+    const chunkN = Math.ceil(cubes / chunkSize);
+    const chunkTotal = chunkN * chunkN * chunkN;
+
+    const chunkMinSabs = [
+      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
+      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
+    ];
+    const chunkMaxSabs = [
+      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
+      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
+    ];
+
+    // Shared control layout:
+    // ctrlI32[0] = epoch
+    // ctrlI32[1] = frontIndex (0/1)
+    const ctrl = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+    const ctrlI32 = new Int32Array(ctrl);
+    ctrlI32[0] = 0;
+    ctrlI32[1] = 0;
+
+    // timingI64[0] = last publish Date.now() (ms)
+    // timingI64[1] = target period (ms)
+    const timing = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 2);
+    const timingI64 = new BigInt64Array(timing);
+    timingI64[0] = BigInt(Date.now());
+    timingI64[1] = BigInt(periodMs);
+
+    simWorker = new Worker(new URL("./sim_worker.js", import.meta.url), { type: "module" });
+    meshWorker = new Worker(new URL("./mesh_worker.js", import.meta.url), { type: "module" });
+
+    simWorker.postMessage({
+      type: "init",
+      ctrl,
+      vSabs,
+      chunkMinSabs,
+      chunkMaxSabs,
+      timing,
+      seed,
+      dims,
+      periodMs,
+    });
+    meshWorker.postMessage({ type: "init", ctrl, vSabs, chunkMinSabs, chunkMaxSabs, timing });
+
+    simWorker.onmessage = (e) => {
+      const msg = e.data;
+      if (!msg || typeof msg !== "object") return;
+
+      if (msg.type === "sim_ready") {
+        return;
+      }
+
+      if (msg.type === "sim_stats") {
+        lastSimStepsPerSec = msg.stepsPerSec || 0;
+        lastSimTotalSteps = msg.totalSteps || 0;
+        return;
+      }
+
+      if (msg.type === "error") {
+        console.error(msg.message);
+        statsEl.textContent = String(msg.message);
+      }
+    };
+
+    meshWorker.onmessage = (e) => {
+      const msg = e.data;
+      if (!msg || typeof msg !== "object") return;
+
+      if (msg.type === "mesh_ready") {
+        meshReady = true;
+        return;
+      }
+
+      if (msg.type === "mesh") {
+        uploadMeshFromBuffers(gl, gpuMesh, msg);
+        lastMeshMs = msg.meshMs || 0;
+        lastMeshEpoch = msg.epoch || 0;
+        return;
+      }
+
+      if (msg.type === "error") {
+        console.error(msg.message);
+        statsEl.textContent = String(msg.message);
+      }
+    };
+  }
+
+  function restartFromUi() {
+    const seed = normalizeSeed(seedInput?.value);
+    if (seedInput) seedInput.value = String(seed);
+    startWorkers(seed);
+  }
+
+  const urlSeed = new URLSearchParams(globalThis.location?.search ?? "").get("seed");
+  const initialSeed = normalizeSeed(urlSeed ?? seedInput?.value ?? 1337);
+  if (seedInput) seedInput.value = String(initialSeed);
+
+  restartBtn?.addEventListener("click", () => {
+    document.exitPointerLock?.();
+    restartFromUi();
+  });
+
+  seedInput?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    restartFromUi();
+  });
 
   let lastCamSendAt = 0;
+  startWorkers(initialSeed);
   function sendCamera() {
     const now = performance.now();
-    // Throttle camera updates to reduce message spam.
-    if (now - lastCamSendAt < 50) return;
+    if (now - lastCamSendAt < 33) return;
     lastCamSendAt = now;
 
-    if (!workerReady) return;
-    worker.postMessage({
+    if (!meshReady || !meshWorker) return;
+    meshWorker.postMessage({
       type: "camera",
       pos: cam.pos,
       radius: viewRadius,
@@ -434,7 +576,7 @@ async function main() {
     gl.bindVertexArray(null);
 
     const vtx = gpuMesh.vertexCount;
-    statsEl.textContent = `verts ${vtx.toLocaleString()}  iso ${iso.toFixed(2)}  r ${viewRadius.toFixed(2)}  sim ${lastStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  steps ${Math.floor(lastTotalSteps).toLocaleString()}`;
+    statsEl.textContent = `verts ${vtx.toLocaleString()}  iso ${iso.toFixed(2)}  r ${viewRadius.toFixed(2)}  sim ${lastSimStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  epoch ${lastMeshEpoch}  steps ${Math.floor(lastSimTotalSteps).toLocaleString()}`;
 
     requestAnimationFrame(render);
   }

@@ -6,9 +6,9 @@ mod meshing;
 #[path = "sim.rs"]
 mod simulation;
 
-pub use simulation::{GrayScottParams, Simulation};
+pub use simulation::{GrayScottParams, ScalarFieldMesher, Simulation};
 
 #[wasm_bindgen(start)]
 pub fn wasm_start() {
-  // Keep empty: explicit initialization in JS.
+    // Keep empty: explicit initialization in JS.
 }

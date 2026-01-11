@@ -1,0 +1,18 @@
+https://localhost:8080 {
+  # Serve the repo root so `/web/` and `/wasm/` both work.
+  root * .
+
+  file_server
+
+  # Needed for `SharedArrayBuffer` (crossOriginIsolated).
+  header {
+    Cross-Origin-Opener-Policy "same-origin"
+    Cross-Origin-Embedder-Policy "require-corp"
+    Cross-Origin-Resource-Policy "same-origin"
+    Origin-Agent-Cluster "?1"
+  }
+
+  # Make HTTPS explicit for localhost.
+  tls internal
+}
+

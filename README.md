@@ -16,12 +16,14 @@ Build wasm:
 
 - `wasm-pack build wasm --release --target web --out-dir web/pkg`
 
-Serve the repo root (any static server works):
+Serve the repo root (any static server works).
 
-- `python3 -m http.server 8080`
+Note: this project now uses `SharedArrayBuffer`, so the page must be `crossOriginIsolated` (COOP/COEP headers) and served from a secure context.
+
+- `caddy run`
 
 Open:
-- `http://localhost:8080/web/`
+- `https://localhost:8080/web/`
 
 ## Controls
 
