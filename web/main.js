@@ -1,6 +1,12 @@
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
 const seedInput = document.querySelector("#seed");
+const simStrategySelect = document.querySelector("#simStrategy");
+const simInitSelect = document.querySelector("#simInit");
+const simParamsEl = document.querySelector("#simParams");
+const volumeThresholdInput = document.querySelector("#volumeThreshold");
+const viewRadiusInput = document.querySelector("#viewRadius");
+const gradMagGainInput = document.querySelector("#gradMagGain");
 const restartBtn = document.querySelector("#restart");
 
 function normalizeSeed(value) {
@@ -310,12 +316,13 @@ async function main() {
 
   const cam = new FlyCamera();
 
-  const viewRadius = 0.35;
-  const iso = 0.5;
-  const meshColor = [0.15, 0.65, 0.9, 0.9];
+  let viewRadius = 0.35;
+  let volumeThreshold = 0.25;
+  let gradMagGain = 25.0;
+  const meshColor = [0.15, 0.65, 0.9, 0.75];
 
   const fogColor = [0.04, 0.06, 0.08];
-  const fogDensity = 4.0;
+  const fogDensity = 12.0;
 
   const gpuMesh = createMeshGpu(gl);
 
@@ -343,11 +350,12 @@ async function main() {
     }
   });
 
+  const lookSensitivity = 0.0015 * 0.75;
   window.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== canvas) return;
     // Non-inverted: moving mouse right => look right, mouse up => look up.
-    cam.yaw += e.movementX * 0.0015;
-    cam.pitch += e.movementY * 0.0015;
+    cam.yaw += e.movementX * lookSensitivity;
+    cam.pitch += e.movementY * lookSensitivity;
     cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch));
   });
 
@@ -363,7 +371,105 @@ async function main() {
   }
 
   const dims = 192;
-  const periodMs = 500;
+
+  const simStrategies = {
+    gray_scott: {
+      id: "gray_scott",
+      name: "Gray–Scott reaction–diffusion",
+      params: [
+        {
+          key: "du",
+          path: ["params", "du"],
+          label: "U diffusion rate (du)",
+          min: 0,
+          max: 1,
+          step: 0.001,
+          defaultValue: 0.16,
+          requiresRestart: true,
+        },
+        {
+          key: "dv",
+          path: ["params", "dv"],
+          label: "V diffusion rate (dv)",
+          min: 0,
+          max: 1,
+          step: 0.001,
+          defaultValue: 0.08,
+          requiresRestart: true,
+        },
+        {
+          key: "feed",
+          path: ["params", "feed"],
+          label: "Feed rate (U replenishment)",
+          min: 0,
+          max: 0.1,
+          step: 0.0001,
+          defaultValue: 0.0367,
+          requiresRestart: true,
+        },
+        {
+          key: "kill",
+          path: ["params", "kill"],
+          label: "Kill rate (V removal)",
+          min: 0,
+          max: 0.1,
+          step: 0.0001,
+          defaultValue: 0.0649,
+          requiresRestart: true,
+        },
+        {
+          key: "dt",
+          path: ["dt"],
+          label: "Time step (dt)",
+          min: 0.001,
+          max: 1,
+          step: 0.001,
+          defaultValue: 0.1,
+          requiresRestart: false,
+        },
+        {
+          key: "ticksPerSecond",
+          path: ["ticksPerSecond"],
+          label: "Simulation ticks per second",
+          min: 1,
+          max: 30,
+          step: 1,
+          defaultValue: 10,
+          requiresRestart: false,
+        },
+      ],
+      seedings: [
+        {
+          id: "classic",
+          name: "Random spheres + noise (long-lived)",
+          config: {
+            type: "classic",
+            noiseAmp: 0.01,
+            sphereCount: 20,
+            sphereRadius01: 0.05,
+            sphereRadiusJitter01: 0.4,
+            u: 0.5,
+            v: 0.25,
+          },
+        },
+        {
+          id: "perlin",
+          name: "Perlin noise",
+          config: { type: "perlin", frequency: 6.0, octaves: 4, v_bias: 0.0, v_amp: 1.0 },
+        },
+      ],
+    },
+  };
+
+  const simConfig = {
+    strategyId: "gray_scott",
+    params: {},
+    dt: 0.1,
+    ticksPerSecond: 5,
+    seeding: simStrategies.gray_scott.seedings[0].config,
+  };
+
+  resetSimConfigForStrategy(simConfig.strategyId);
 
   const n = dims * dims * dims;
 
@@ -428,6 +534,9 @@ async function main() {
     // timingI64[0] = last publish Date.now() (ms)
     // timingI64[1] = target period (ms)
     const timing = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 2);
+    const ticksPerSecond = Math.max(1, Math.min(30, Math.trunc(simConfig.ticksPerSecond ?? 5)));
+    const periodMs = Math.max(1, Math.round(1000 / ticksPerSecond));
+
     const timingI64 = new BigInt64Array(timing);
     timingI64[0] = BigInt(Date.now());
     timingI64[1] = BigInt(periodMs);
@@ -445,6 +554,7 @@ async function main() {
       seed,
       dims,
       periodMs,
+      simConfig,
     });
     meshWorker.postMessage({ type: "init", ctrl, vSabs, chunkMinSabs, chunkMaxSabs, timing });
 
@@ -497,9 +607,196 @@ async function main() {
     startWorkers(seed);
   }
 
+  function parseClampedFloat(value, fallback, min, max) {
+    const n = Number.parseFloat(String(value ?? ""));
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
   const urlSeed = new URLSearchParams(globalThis.location?.search ?? "").get("seed");
   const initialSeed = normalizeSeed(urlSeed ?? seedInput?.value ?? 1337);
   if (seedInput) seedInput.value = String(initialSeed);
+
+  function decimalsForStep(step) {
+    const s = String(step ?? "");
+    const idx = s.indexOf(".");
+    if (idx === -1) return 0;
+    return s.length - idx - 1;
+  }
+
+  function setNumberInputValue(input, value, step) {
+    const decimals = decimalsForStep(step);
+    input.value = Number(value).toFixed(decimals);
+  }
+
+  function resetSimConfigForStrategy(strategyId) {
+    const strategy = simStrategies[strategyId];
+    if (!strategy) throw new Error(`unknown sim strategy: ${String(strategyId)}`);
+
+    simConfig.strategyId = strategyId;
+
+    // Rebuild params/dt from defaults in the schema.
+    simConfig.params = {};
+    for (const p of strategy.params) {
+      if (p.path.length === 2 && p.path[0] === "params") {
+        simConfig.params[p.path[1]] = p.defaultValue;
+      } else if (p.path.length === 1 && p.path[0] === "dt") {
+        simConfig.dt = p.defaultValue;
+      } else if (p.path.length === 1 && p.path[0] === "ticksPerSecond") {
+        simConfig.ticksPerSecond = p.defaultValue;
+      }
+    }
+
+    simConfig.seeding = strategy.seedings?.[0]?.config ?? simConfig.seeding;
+  }
+
+  function getSimConfigValue(path) {
+    let cur = simConfig;
+    for (const key of path) {
+      if (!cur || typeof cur !== "object") return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+
+  function setSimConfigValue(path, value) {
+    if (path.length === 1) {
+      simConfig[path[0]] = value;
+      return;
+    }
+
+    if (path.length === 2 && path[0] === "params") {
+      simConfig.params[path[1]] = value;
+      return;
+    }
+
+    throw new Error(`unsupported sim config path: ${path.join(".")}`);
+  }
+
+  function buildSimConfigUpdate(path, value) {
+    if (path.length === 1) return { [path[0]]: value };
+    if (path.length === 2 && path[0] === "params") return { params: { [path[1]]: value } };
+    throw new Error(`unsupported sim config update path: ${path.join(".")}`);
+  }
+
+  function renderSimParams() {
+    const strategy = simStrategies[simConfig.strategyId];
+    if (!simParamsEl || !strategy) return;
+
+    simParamsEl.textContent = "";
+
+    for (const p of strategy.params) {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = String(p.step);
+      input.min = String(p.min);
+      input.max = String(p.max);
+
+      const label = document.createElement("label");
+      label.append(p.label, input);
+
+      const initialValue = getSimConfigValue(p.path) ?? p.defaultValue;
+      setNumberInputValue(input, initialValue, p.step);
+
+      const applyValue = (format) => {
+        const cur = getSimConfigValue(p.path) ?? p.defaultValue;
+        const next = parseClampedFloat(input.value, cur, p.min, p.max);
+        setSimConfigValue(p.path, next);
+        if (format) setNumberInputValue(input, next, p.step);
+        simWorker?.postMessage({ type: "sim_config", config: buildSimConfigUpdate(p.path, next) });
+      };
+
+      if (p.requiresRestart) {
+        input.addEventListener("change", () => applyValue(true));
+      } else {
+        input.addEventListener("input", () => applyValue(false));
+        input.addEventListener("change", () => applyValue(true));
+      }
+
+      simParamsEl.appendChild(label);
+    }
+  }
+
+  function renderSimInitSelect() {
+    if (!simInitSelect) return;
+
+    const strategy = simStrategies[simConfig.strategyId];
+    simInitSelect.textContent = "";
+
+    for (const s of strategy.seedings ?? []) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.name;
+      simInitSelect.appendChild(opt);
+    }
+
+    const curType = simConfig.seeding?.type;
+    const selected = (strategy.seedings ?? []).find((s) => s.config.type === curType) ??
+      strategy.seedings?.[0];
+    if (selected) simInitSelect.value = selected.id;
+
+    simInitSelect.onchange = () => {
+      const next = (strategy.seedings ?? []).find((s) => s.id === simInitSelect.value);
+      if (!next) return;
+      simConfig.seeding = next.config;
+      simWorker?.postMessage({ type: "sim_config", config: { seeding: simConfig.seeding } });
+    };
+  }
+
+  function renderSimStrategySelect() {
+    if (!simStrategySelect) return;
+
+    simStrategySelect.textContent = "";
+
+    for (const strategy of Object.values(simStrategies)) {
+      const opt = document.createElement("option");
+      opt.value = strategy.id;
+      opt.textContent = strategy.name;
+      simStrategySelect.appendChild(opt);
+    }
+
+    simStrategySelect.value = simConfig.strategyId;
+
+    simStrategySelect.onchange = () => {
+      const nextId = simStrategySelect.value;
+      resetSimConfigForStrategy(nextId);
+      renderSimInitSelect();
+      renderSimParams();
+      simWorker?.postMessage({ type: "sim_config", config: simConfig });
+    };
+  }
+
+  renderSimStrategySelect();
+  renderSimInitSelect();
+  renderSimParams();
+
+  if (volumeThresholdInput) volumeThresholdInput.value = volumeThreshold.toFixed(2);
+  if (viewRadiusInput) viewRadiusInput.value = viewRadius.toFixed(2);
+  if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
+
+  volumeThresholdInput?.addEventListener("input", () => {
+    volumeThreshold = parseClampedFloat(volumeThresholdInput.value, volumeThreshold, 0, 1);
+  });
+  volumeThresholdInput?.addEventListener("change", () => {
+    volumeThreshold = parseClampedFloat(volumeThresholdInput.value, volumeThreshold, 0, 1);
+    volumeThresholdInput.value = volumeThreshold.toFixed(2);
+  });
+
+  viewRadiusInput?.addEventListener("input", () => {
+    viewRadius = parseClampedFloat(viewRadiusInput.value, viewRadius, 0.05, 5);
+  });
+  viewRadiusInput?.addEventListener("change", () => {
+    viewRadius = parseClampedFloat(viewRadiusInput.value, viewRadius, 0.05, 5);
+    viewRadiusInput.value = viewRadius.toFixed(2);
+  });
+
+  gradMagGainInput?.addEventListener("input", () => {
+    gradMagGain = parseClampedFloat(gradMagGainInput.value, gradMagGain, 0, 50);
+  });
+  gradMagGainInput?.addEventListener("change", () => {
+    gradMagGain = parseClampedFloat(gradMagGainInput.value, gradMagGain, 0, 50);
+    gradMagGainInput.value = String(gradMagGain);
+  });
 
   restartBtn?.addEventListener("click", () => {
     document.exitPointerLock?.();
@@ -524,13 +821,15 @@ async function main() {
       type: "camera",
       pos: cam.pos,
       radius: viewRadius,
-      iso,
+      iso: volumeThreshold,
       color: meshColor,
+      gradMagGain,
     });
   }
 
+  const moveSpeedScale = 0.5;
   function moveCam(dt) {
-    const v = cam.moveSpeed * dt;
+    const v = cam.moveSpeed * dt * moveSpeedScale;
     let delta = [0, 0, 0];
     const f = cam.forward();
     const r = cam.right();
@@ -542,6 +841,7 @@ async function main() {
 
     cam.pos = vec3Add(cam.pos, delta);
   }
+
 
   let lastT = performance.now();
   function render(tNow) {
@@ -571,12 +871,15 @@ async function main() {
 
     gl.bindVertexArray(gpuMesh.vao);
     if (gpuMesh.indexCount > 0) {
+      // Disable depth writes so inner surfaces can blend through.
+      //gl.depthMask(false);
       gl.drawElements(gl.TRIANGLES, gpuMesh.indexCount, gl.UNSIGNED_INT, 0);
+      gl.depthMask(true);
     }
     gl.bindVertexArray(null);
 
     const vtx = gpuMesh.vertexCount;
-    statsEl.textContent = `verts ${vtx.toLocaleString()}  iso ${iso.toFixed(2)}  r ${viewRadius.toFixed(2)}  sim ${lastSimStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  epoch ${lastMeshEpoch}  steps ${Math.floor(lastSimTotalSteps).toLocaleString()}`;
+    statsEl.textContent = `verts ${vtx.toLocaleString()}  sim ${lastSimStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  epoch ${lastMeshEpoch}  steps ${Math.floor(lastSimTotalSteps).toLocaleString()}`;
 
     requestAnimationFrame(render);
   }

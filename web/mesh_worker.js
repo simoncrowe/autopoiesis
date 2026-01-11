@@ -35,6 +35,74 @@ function copyU32(ptr, len) {
   return new Uint32Array(wasm.memory.buffer, ptr, len).slice();
 }
 
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// Gradient-magnitude colormaps.
+// The mesher outputs normals as (unnormalized) scalar-field gradients, so |normal|
+// is a cheap proxy for local "thickness-ish" detail.
+const colorRamps = {
+  redToBlue(t) {
+    const tt = Math.max(0, Math.min(1, t));
+    return [lerp(1, 0, tt), 0, lerp(0, 1, tt)];
+  },
+
+  // Simple HSV-style rainbow. t=0 -> red, then yellow, green, cyan, blue, magenta, back to red.
+  rainbow(t) {
+    let h = Math.max(0, Math.min(1, t));
+    h = (h * 6) % 6;
+    const i = Math.floor(h);
+    const f = h - i;
+
+    const q = 1 - f;
+
+    switch (i) {
+      case 0:
+        return [1, f, 0];
+      case 1:
+        return [q, 1, 0];
+      case 2:
+        return [0, 1, f];
+      case 3:
+        return [0, q, 1];
+      case 4:
+        return [f, 0, 1];
+      default:
+        return [1, 0, q];
+    }
+  },
+};
+
+const ACTIVE_RAMP = colorRamps.rainbow;
+let gradMagGain = 18.0;
+
+function gradMagToT(gradMag) {
+  const g = Math.max(0, gradMag);
+  return 1 - Math.exp(-g * gradMagGain);
+}
+
+function recolorByGradientMagnitude(normals, colors) {
+  const vertexCount = Math.floor(normals.length / 3);
+  if (vertexCount <= 0) return;
+
+  const alpha = colors.length >= 4 ? colors[3] : 1;
+
+  for (let i = 0; i < vertexCount; i++) {
+    const nx = normals[i * 3 + 0];
+    const ny = normals[i * 3 + 1];
+    const nz = normals[i * 3 + 2];
+    const gradMag = Math.hypot(nx, ny, nz);
+    const t = gradMagToT(gradMag);
+    const [r, g, b] = ACTIVE_RAMP(t);
+
+    colors[i * 4 + 0] = r;
+    colors[i * 4 + 1] = g;
+    colors[i * 4 + 2] = b;
+    colors[i * 4 + 3] = alpha;
+  }
+}
+
 function lerpFactor() {
   if (!timingI64) return 1;
   const lastPublishMs = Number(Atomics.load(timingI64, TIMING_LAST_PUBLISH_MS) || 0n);
@@ -90,6 +158,8 @@ function buildMesh() {
   const colors = copyFloat32(mesher.mesh_colors_ptr(), mesher.mesh_colors_len());
   const indices = copyU32(mesher.mesh_indices_ptr(), mesher.mesh_indices_len());
 
+  recolorByGradientMagnitude(normals, colors);
+
   self.postMessage(
     {
       type: "mesh",
@@ -129,6 +199,11 @@ function handleCamera(msg) {
 
   if (typeof msg.iso === "number" && msg.iso !== iso) {
     iso = msg.iso;
+    changed = true;
+  }
+
+  if (typeof msg.gradMagGain === "number" && msg.gradMagGain !== gradMagGain) {
+    gradMagGain = msg.gradMagGain;
     changed = true;
   }
 
