@@ -173,12 +173,12 @@ This field is passed to marching tetrahedra as-is.
 
 ## Integration with existing PoC
 
-The current PoC selects simulation behavior via the JS-side `strategyId` (see `web/main.js` and `web/sim_worker.js`).
+The current PoC selects simulation behavior via the JS-side `strategyId` (see `web/main.js` and the simulation worker).
 
 **Practical MVP integration plan:**
 - Keep the existing Gray–Scott wasm export `Simulation` unchanged.
 - Add a new wasm export `StochasticRdmeSimulation`.
-- Update `web/sim_worker.js` to construct the correct wasm simulation class based on `simConfig.strategyId`.
+- Update the simulation worker to construct the correct wasm simulation class based on `simConfig.strategyId`.
 
 **Compatibility contract (what the sim worker needs):**
 - `step(steps: usize)`

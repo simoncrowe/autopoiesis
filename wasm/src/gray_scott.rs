@@ -3,6 +3,8 @@ use wasm_bindgen::prelude::*;
 use crate::math::{clamp01, lerp};
 use crate::meshing::{generate_isosurface_mesh, mesh_region_append, MeshBuffers};
 
+use rayon::prelude::*;
+
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct GrayScottParams {
@@ -507,7 +509,10 @@ impl Simulation {
         let k = self.params.kill;
 
         let nx = self.nx;
+        let ny = self.ny;
+        let nz = self.nz;
         let nxy = self.nxy;
+        let dt = self.dt;
 
         let x_minus = &self.x_minus;
         let x_plus = &self.x_plus;
@@ -516,56 +521,68 @@ impl Simulation {
         let z_minus = &self.z_minus;
         let z_plus = &self.z_plus;
 
-        let u = &self.u;
-        let v = &self.v;
-        let u2 = &mut self.u2;
-        let v2 = &mut self.v2;
+        {
+            let u = &self.u;
+            let v = &self.v;
 
-        for z in 0..self.nz {
-            let z_off = z * nxy;
-            let z_off_m = z_minus[z] * nxy;
-            let z_off_p = z_plus[z] * nxy;
+            let u2 = &mut self.u2;
+            let v2 = &mut self.v2;
 
-            for y in 0..self.ny {
-                let y_off = z_off + y * nx;
-                let y_off_m = z_off + y_minus[y] * nx;
-                let y_off_p = z_off + y_plus[y] * nx;
-                let y_off_zm = z_off_m + y * nx;
-                let y_off_zp = z_off_p + y * nx;
+            u2.par_chunks_mut(nxy)
+                .zip(v2.par_chunks_mut(nxy))
+                .enumerate()
+                .for_each(|(z, (u2z, v2z))| {
+                    let z_off = z * nxy;
+                    let z_off_m = z_minus[z] * nxy;
+                    let z_off_p = z_plus[z] * nxy;
 
-                for x in 0..nx {
-                    let c = y_off + x;
-                    let uu = u[c];
-                    let vv = v[c];
+                    for y in 0..ny {
+                        let y_off = z_off + y * nx;
+                        let y_off_m = z_off + y_minus[y] * nx;
+                        let y_off_p = z_off + y_plus[y] * nx;
+                        let y_off_zm = z_off_m + y * nx;
+                        let y_off_zp = z_off_p + y * nx;
 
-                    let u_lap = u[y_off + x_minus[x]]
-                        + u[y_off + x_plus[x]]
-                        + u[y_off_m + x]
-                        + u[y_off_p + x]
-                        + u[y_off_zm + x]
-                        + u[y_off_zp + x]
-                        - 6.0 * uu;
+                        let row = y * nx;
+                        for x in 0..nx {
+                            let c = y_off + x;
+                            let uu = u[c];
+                            let vv = v[c];
 
-                    let v_lap = v[y_off + x_minus[x]]
-                        + v[y_off + x_plus[x]]
-                        + v[y_off_m + x]
-                        + v[y_off_p + x]
-                        + v[y_off_zm + x]
-                        + v[y_off_zp + x]
-                        - 6.0 * vv;
+                            let u_lap = u[y_off + x_minus[x]]
+                                + u[y_off + x_plus[x]]
+                                + u[y_off_m + x]
+                                + u[y_off_p + x]
+                                + u[y_off_zm + x]
+                                + u[y_off_zp + x]
+                                - 6.0 * uu;
 
-                    let uvv = uu * vv * vv;
-                    let du_dt = du * u_lap - uvv + f * (1.0 - uu);
-                    let dv_dt = dv * v_lap + uvv - (f + k) * vv;
+                            let v_lap = v[y_off + x_minus[x]]
+                                + v[y_off + x_plus[x]]
+                                + v[y_off_m + x]
+                                + v[y_off_p + x]
+                                + v[y_off_zm + x]
+                                + v[y_off_zp + x]
+                                - 6.0 * vv;
 
-                    u2[c] = clamp01(uu + self.dt * du_dt);
-                    v2[c] = clamp01(vv + self.dt * dv_dt);
-                }
-            }
+                            let uvv = uu * vv * vv;
+                            let du_dt = du * u_lap - uvv + f * (1.0 - uu);
+                            let dv_dt = dv * v_lap + uvv - (f + k) * vv;
+
+                            let local = row + x;
+                            u2z[local] = clamp01(uu + dt * du_dt);
+                            v2z[local] = clamp01(vv + dt * dv_dt);
+                        }
+                    }
+                });
         }
 
         std::mem::swap(&mut self.u, &mut self.u2);
         std::mem::swap(&mut self.v, &mut self.v2);
+
+        // Keep the values used to size the parallel chunks honest.
+        debug_assert_eq!(nxy, nx * ny);
+        debug_assert_eq!(self.u.len(), nz * nxy);
     }
 
     pub fn v_min(&self) -> f32 {
@@ -601,6 +618,18 @@ impl Simulation {
 
     pub fn v_len(&self) -> usize {
         self.v.len()
+    }
+
+    pub(crate) fn v_slice(&self) -> &[f32] {
+        &self.v
+    }
+
+    pub(crate) fn chunk_v_min_slice(&self) -> &[f32] {
+        &self.chunk_v_min
+    }
+
+    pub(crate) fn chunk_v_max_slice(&self) -> &[f32] {
+        &self.chunk_v_max
     }
 
     // Chunk min/max are used for iso culling in meshing.
