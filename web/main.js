@@ -924,6 +924,7 @@ async function main() {
     let threadStatus = "thr ?";
     if (threadInfo && typeof threadInfo === "object") {
       const threads = Number.isFinite(threadInfo.threads) ? Math.max(1, Math.trunc(threadInfo.threads)) : 1;
+      const rayonThreads = Number.isFinite(threadInfo.rayonThreads) ? Math.max(1, Math.trunc(threadInfo.rayonThreads)) : null;
       const reasonMap = {
         no_sab: "noSAB",
         not_isolated: "noCOOP/COEP",
@@ -934,16 +935,18 @@ async function main() {
       };
       const shortReason = reasonMap[String(threadInfo.reason)] || String(threadInfo.reason || "");
 
+      const active = rayonThreads ?? "?";
+
       if (threadInfo.status === "enabled") {
-        threadStatus = `thr ${threads}`;
+        threadStatus = `thr/act (${threads}/${active})`;
       } else if (threadInfo.status === "disabled") {
-        threadStatus = `thr ${threads}${shortReason ? ` (${shortReason})` : ""}`;
+        threadStatus = `thr/act (${threads}/${active})${shortReason ? ` (${shortReason})` : ""}`;
       } else if (threadInfo.status === "unavailable") {
-        threadStatus = `thr ${threads}${shortReason ? ` (mt ${shortReason})` : " (mt n/a)"}`;
+        threadStatus = `thr/act (${threads}/${active})${shortReason ? ` (mt ${shortReason})` : " (mt n/a)"}`;
       } else if (threadInfo.status === "failed") {
-        threadStatus = `thr ${threads}${shortReason ? ` (mt ${shortReason})` : " (mt fail)"}`;
+        threadStatus = `thr/act (${threads}/${active})${shortReason ? ` (mt ${shortReason})` : " (mt fail)"}`;
       } else {
-        threadStatus = `thr ${threads}`;
+        threadStatus = `thr/act (${threads}/${active})`;
       }
     }
 

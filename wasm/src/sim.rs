@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::meshing::{mesh_region_append, mesh_region_append_lerp, MeshBuffers};
+use rayon::prelude::*;
 
 const CHUNK: usize = 16;
 
@@ -351,6 +352,19 @@ impl ScalarFieldMesher {
             }
         }
 
+        #[derive(Clone, Copy)]
+        struct Job {
+            x0: isize,
+            x1: isize,
+            y0: isize,
+            y1: isize,
+            z0: isize,
+            z1: isize,
+            stride: usize,
+        }
+
+        let mut jobs = Vec::new();
+
         for cz in min_cz..=max_cz {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
@@ -408,14 +422,7 @@ impl ScalarFieldMesher {
                         4
                     };
 
-                    mesh_region_append(
-                        &self.scalars_next,
-                        self.nx,
-                        self.ny,
-                        self.nz,
-                        iso,
-                        color,
-                        &mut self.mesh,
+                    jobs.push(Job {
                         x0,
                         x1,
                         y0,
@@ -423,10 +430,43 @@ impl ScalarFieldMesher {
                         z0,
                         z1,
                         stride,
-                    );
+                    });
                 }
             }
         }
+
+        const JOB_BATCH: usize = 8;
+
+        let mesh = jobs
+            .par_chunks(JOB_BATCH)
+            .map(|chunk| {
+                let mut acc = MeshBuffers::new();
+                for job in chunk {
+                    mesh_region_append(
+                        &self.scalars_next,
+                        self.nx,
+                        self.ny,
+                        self.nz,
+                        iso,
+                        color,
+                        &mut acc,
+                        job.x0,
+                        job.x1,
+                        job.y0,
+                        job.y1,
+                        job.z0,
+                        job.z1,
+                        job.stride,
+                    );
+                }
+                acc
+            })
+            .reduce(MeshBuffers::new, |mut a, b| {
+                a.append(&b);
+                a
+            });
+
+        self.mesh = mesh;
     }
 
     pub fn generate_mesh_visible_lerp(
@@ -524,6 +564,19 @@ impl ScalarFieldMesher {
             }
         }
 
+        #[derive(Clone, Copy)]
+        struct Job {
+            x0: isize,
+            x1: isize,
+            y0: isize,
+            y1: isize,
+            z0: isize,
+            z1: isize,
+            stride: usize,
+        }
+
+        let mut jobs = Vec::new();
+
         for cz in min_cz..=max_cz {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
@@ -582,6 +635,26 @@ impl ScalarFieldMesher {
                         4
                     };
 
+                    jobs.push(Job {
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                        z0,
+                        z1,
+                        stride,
+                    });
+                }
+            }
+        }
+
+        const JOB_BATCH: usize = 8;
+
+        let mesh = jobs
+            .par_chunks(JOB_BATCH)
+            .map(|chunk| {
+                let mut acc = MeshBuffers::new();
+                for job in chunk {
                     mesh_region_append_lerp(
                         &self.scalars_prev,
                         &self.scalars_next,
@@ -591,18 +664,24 @@ impl ScalarFieldMesher {
                         self.nz,
                         iso,
                         color,
-                        &mut self.mesh,
-                        x0,
-                        x1,
-                        y0,
-                        y1,
-                        z0,
-                        z1,
-                        stride,
+                        &mut acc,
+                        job.x0,
+                        job.x1,
+                        job.y0,
+                        job.y1,
+                        job.z0,
+                        job.z1,
+                        job.stride,
                     );
                 }
-            }
-        }
+                acc
+            })
+            .reduce(MeshBuffers::new, |mut a, b| {
+                a.append(&b);
+                a
+            });
+
+        self.mesh = mesh;
     }
 
     pub fn mesh_vertex_count(&self) -> usize {

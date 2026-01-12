@@ -5,6 +5,7 @@ import init, {
   StochasticRdmeParams,
   StochasticRdmeSimulation,
   init_thread_pool,
+  rayon_num_threads,
 } from "../wasm/web/pkg/abiogenesis.js";
 
 const DEFAULT_DIMS = 192;
@@ -313,6 +314,7 @@ async function ensureWasm(threadCount) {
       reason,
       requestedThreads,
       threads: 1,
+      rayonThreads: null,
       hasSAB,
       isIsolated,
       hasSharedMemory,
@@ -336,6 +338,7 @@ async function ensureWasm(threadCount) {
       reason: "not_requested",
       requestedThreads,
       threads: 1,
+      rayonThreads: null,
       hasSAB,
       isIsolated,
       hasSharedMemory,
@@ -346,12 +349,23 @@ async function ensureWasm(threadCount) {
 
   try {
     await init_thread_pool(requestedThreads);
+
+    let rayonThreads = null;
+    try {
+      if (typeof rayon_num_threads === "function") {
+        rayonThreads = rayon_num_threads();
+      }
+    } catch {
+      // Ignore: just diagnostic.
+    }
+
     self.postMessage({
       type: "thread_info",
       status: "enabled",
       reason: "ok",
       requestedThreads,
       threads: requestedThreads,
+      rayonThreads,
       hasSAB,
       isIsolated,
       hasSharedMemory,
@@ -366,6 +380,7 @@ async function ensureWasm(threadCount) {
       reason: "init_failed",
       requestedThreads,
       threads: 1,
+      rayonThreads: null,
       hasSAB,
       isIsolated,
       hasSharedMemory,

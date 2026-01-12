@@ -59,6 +59,26 @@ impl MeshBuffers {
         self.indices.clear();
     }
 
+    pub fn append(&mut self, other: &MeshBuffers) {
+        if other.positions.is_empty() {
+            return;
+        }
+
+        debug_assert_eq!(other.positions.len(), other.normals.len());
+        debug_assert_eq!(other.colors.len() * 3, other.positions.len() * 4);
+
+        let base_vertex = (self.positions.len() / 3) as u32;
+
+        self.positions.extend_from_slice(&other.positions);
+        self.normals.extend_from_slice(&other.normals);
+        self.colors.extend_from_slice(&other.colors);
+
+        self.indices.reserve(other.indices.len());
+        for &i in &other.indices {
+            self.indices.push(base_vertex + i);
+        }
+    }
+
     fn push_vertex(&mut self, position: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> u32 {
         let vertex_index = (self.positions.len() / 3) as u32;
         self.positions.extend_from_slice(&position);
