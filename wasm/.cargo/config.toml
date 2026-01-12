@@ -1,0 +1,33 @@
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C",
+  "target-feature=+atomics,+bulk-memory,+mutable-globals",
+
+  # Required for wasm threads / SharedArrayBuffer memory:
+  # - import memory so JS can construct it as `shared: true`
+  # - mark memory as shared and give it a maximum (required by the proposal)
+  "-C",
+  "link-arg=--import-memory",
+  "-C",
+  "link-arg=--shared-memory",
+  "-C",
+  "link-arg=--max-memory=2147483648",
+
+  # wasm-bindgen expects these TLS-related exports for threading.
+  "-C",
+  "link-arg=--export=__wasm_init_tls",
+  "-C",
+  "link-arg=--export=__tls_base",
+  "-C",
+  "link-arg=--export=__tls_size",
+  "-C",
+  "link-arg=--export=__tls_align",
+]
+
+# When using `--shared-memory`, *all* object files must be compiled with
+# `+atomics` and `+bulk-memory` (including `std`). The prebuilt `std` shipped
+# with rustup is not compiled with those target features, so we must build it.
+#
+# This requires a nightly toolchain and the `rust-src` component.
+[unstable]
+build-std = ["std", "panic_abort"]

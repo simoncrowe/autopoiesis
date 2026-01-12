@@ -7,6 +7,16 @@ https://localhost:8080 {
   # Serve the repo root so `/web/` and `/wasm/` both work.
   root * .
 
+  # wasm-bindgen-rayon workers do `import('../../..')` from within
+  # `.../wasm/web/pkg/snippets/.../workerHelpers.js`, which resolves to
+  # `/wasm/web/pkg/`.
+  # Browsers don't resolve directory imports via package.json, so rewrite
+  # the package root to the actual ESM entry.
+  @wasm_pkg_root {
+    path /wasm/web/pkg /wasm/web/pkg/
+  }
+  rewrite @wasm_pkg_root /wasm/web/pkg/abiogenesis.js
+
   file_server
 
   # Needed for `SharedArrayBuffer` (crossOriginIsolated).

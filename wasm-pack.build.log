@@ -1,0 +1,14 @@
+[INFO]: 🎯  Checking for the Wasm target...
+[INFO]: 🌀  Compiling to Wasm...
+   Compiling wasm-bindgen-rayon v1.3.0
+error: Did you forget to enable `atomics` and `bulk-memory` features as outlined in wasm-bindgen-rayon README?
+  --> /home/sc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasm-bindgen-rayon-1.3.0/src/lib.rs:20:1
+   |
+20 | compile_error!("Did you forget to enable `atomics` and `bulk-memory` features as outlined in wasm-bindgen-rayon README?");
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `wasm-bindgen-rayon` (lib) due to 1 previous error
+Error: Compiling your crate to WebAssembly failed
+Caused by: Compiling your crate to WebAssembly failed
+Caused by: failed to execute `cargo build`: exited with exit status: 101
+  full command: cd "wasm" && "cargo" "build" "--lib" "--release" "--target" "wasm32-unknown-unknown"

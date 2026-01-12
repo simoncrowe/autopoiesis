@@ -476,6 +476,18 @@ impl StochasticRdmeSimulation {
         self.v.len()
     }
 
+    pub(crate) fn v_slice(&self) -> &[f32] {
+        &self.v
+    }
+
+    pub(crate) fn chunk_v_min_slice(&self) -> &[f32] {
+        &self.chunk_v_min
+    }
+
+    pub(crate) fn chunk_v_max_slice(&self) -> &[f32] {
+        &self.chunk_v_max
+    }
+
     pub fn chunk_v_min_ptr(&self) -> u32 {
         self.chunk_v_min.as_ptr() as u32
     }

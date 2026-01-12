@@ -4,7 +4,7 @@ Abiogenesis-inspired pattern exploration MVP:
 - 3D Gray–Scott reaction–diffusion simulation (Rust → wasm)
 - Isosurface extraction in wasm (marching tetrahedra)
 - WebGL 2.0 viewer + free-fly camera (JavaScript)
-- Simulation + meshing run in a Web Worker (smooth rendering)
+- Simulation + meshing run in a single Web Worker (smooth rendering)
 
 ## Build + Run
 
@@ -15,6 +15,11 @@ Prerequisites:
 Build wasm:
 
 - `wasm-pack build wasm --release --target web --out-dir web/pkg`
+
+WASM threads (Rayon) are enabled via `wasm/.cargo/config.toml` (Chrome/Firefox).
+If you need to override, you can also set:
+
+- `RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' wasm-pack build wasm --release --target web --out-dir web/pkg`
 
 This generates the wasm bindings at `wasm/web/pkg/` (imported by the web workers).
 

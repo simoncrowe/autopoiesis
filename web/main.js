@@ -529,21 +529,20 @@ async function main() {
   resetSimConfigForStrategy(simConfig.strategyId);
 
 
-  let simWorker = null;
-  let meshWorker = null;
+  let computeWorker = null;
 
   let lastMeshMs = 0;
   let lastMeshEpoch = 0;
   let lastSimStepsPerSec = 0;
   let lastSimTotalSteps = 0;
-  let meshReady = false;
+  let workerReady = false;
+
+  let threadInfo = null;
 
   function stopWorkers() {
-    simWorker?.terminate();
-    meshWorker?.terminate();
-    simWorker = null;
-    meshWorker = null;
-    meshReady = false;
+    computeWorker?.terminate();
+    computeWorker = null;
+    workerReady = false;
   }
 
   function clampDims(v) {
@@ -556,7 +555,6 @@ async function main() {
     stopWorkers();
 
     const dims = clampDims(simConfig.dims);
-    const n = dims * dims * dims;
 
     // Reset UI + mesh.
     statsEl.textContent = "";
@@ -566,64 +564,26 @@ async function main() {
     lastMeshEpoch = 0;
     lastSimStepsPerSec = 0;
     lastSimTotalSteps = 0;
+    threadInfo = null;
     lastCamSendAt = 0;
 
-    const vSabs = [
-      new SharedArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT),
-      new SharedArrayBuffer(n * Float32Array.BYTES_PER_ELEMENT),
-    ];
+    computeWorker = new Worker(new URL("./compute_worker.js", import.meta.url), { type: "module" });
 
-    // Must match `CHUNK` in `wasm/src/sim.rs`.
-    const chunkSize = 16;
-    const cubes = dims - 1;
-    const chunkN = Math.ceil(cubes / chunkSize);
-    const chunkTotal = chunkN * chunkN * chunkN;
+    const canUseWasmThreads = (globalThis.crossOriginIsolated === true) && (typeof SharedArrayBuffer !== "undefined");
 
-    const chunkMinSabs = [
-      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
-      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
-    ];
-    const chunkMaxSabs = [
-      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
-      new SharedArrayBuffer(chunkTotal * Float32Array.BYTES_PER_ELEMENT),
-    ];
-
-    // Shared control layout:
-    // ctrlI32[0] = epoch
-    // ctrlI32[1] = frontIndex (0/1)
-    const ctrl = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
-    const ctrlI32 = new Int32Array(ctrl);
-    ctrlI32[0] = 0;
-    ctrlI32[1] = 0;
-
-    // timingI64[0] = last publish Date.now() (ms)
-    // timingI64[1] = target period (ms)
-    const timing = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 2);
-    const ticksPerSecond = Math.max(1, Math.min(60, Math.trunc(simConfig.ticksPerSecond ?? 5)));
-    const periodMs = Math.max(1, Math.round(1000 / ticksPerSecond));
-
-    const timingI64 = new BigInt64Array(timing);
-    timingI64[0] = BigInt(Date.now());
-    timingI64[1] = BigInt(periodMs);
-
-    simWorker = new Worker(new URL("./sim_worker.js", import.meta.url), { type: "module" });
-    meshWorker = new Worker(new URL("./mesh_worker.js", import.meta.url), { type: "module" });
-
-    simWorker.postMessage({
+    computeWorker.postMessage({
       type: "init",
-      ctrl,
-      vSabs,
-      chunkMinSabs,
-      chunkMaxSabs,
-      timing,
       seed,
       dims,
-      periodMs,
       simConfig,
+      // Optional: cap by browser. This is advisory only.
+      // Only request threads when SharedArrayBuffer is available.
+      threadCount: (canUseWasmThreads && navigator.hardwareConcurrency)
+        ? Math.max(1, Math.min(8, navigator.hardwareConcurrency))
+        : undefined,
     });
-    meshWorker.postMessage({ type: "init", ctrl, vSabs, chunkMinSabs, chunkMaxSabs, timing, dims });
 
-    simWorker.onmessage = (e) => {
+    computeWorker.onmessage = (e) => {
       const msg = e.data;
       if (!msg || typeof msg !== "object") return;
 
@@ -631,24 +591,23 @@ async function main() {
         return;
       }
 
-      if (msg.type === "sim_stats") {
-        lastSimStepsPerSec = msg.stepsPerSec || 0;
-        lastSimTotalSteps = msg.totalSteps || 0;
+      if (msg.type === "mesh_ready") {
+        workerReady = true;
         return;
       }
 
-      if (msg.type === "error") {
-        console.error(msg.message);
-        statsEl.textContent = String(msg.message);
+      if (msg.type === "thread_info") {
+        threadInfo = msg;
+        // Keep details in the console, but surface a compact status in the HUD.
+        if (msg.status !== "enabled") {
+          console.info("thread_info", msg);
+        }
+        return;
       }
-    };
 
-    meshWorker.onmessage = (e) => {
-      const msg = e.data;
-      if (!msg || typeof msg !== "object") return;
-
-      if (msg.type === "mesh_ready") {
-        meshReady = true;
+      if (msg.type === "sim_stats") {
+        lastSimStepsPerSec = msg.stepsPerSec || 0;
+        lastSimTotalSteps = msg.totalSteps || 0;
         return;
       }
 
@@ -777,7 +736,7 @@ async function main() {
           return;
         }
 
-        simWorker?.postMessage({ type: "sim_config", config: buildSimConfigUpdate(p.path, next) });
+        computeWorker?.postMessage({ type: "sim_config", config: buildSimConfigUpdate(p.path, next) });
       };
 
 
@@ -814,7 +773,7 @@ async function main() {
       const next = (strategy.seedings ?? []).find((s) => s.id === simInitSelect.value);
       if (!next) return;
       simConfig.seeding = next.config;
-      simWorker?.postMessage({ type: "sim_config", config: { seeding: simConfig.seeding } });
+      computeWorker?.postMessage({ type: "sim_config", config: { seeding: simConfig.seeding } });
     };
   }
 
@@ -844,7 +803,7 @@ async function main() {
         return;
       }
 
-      simWorker?.postMessage({ type: "sim_config", config: simConfig });
+      computeWorker?.postMessage({ type: "sim_config", config: simConfig });
     };
   }
 
@@ -898,8 +857,8 @@ async function main() {
     if (now - lastCamSendAt < 33) return;
     lastCamSendAt = now;
 
-    if (!meshReady || !meshWorker) return;
-    meshWorker.postMessage({
+    if (!workerReady || !computeWorker) return;
+    computeWorker.postMessage({
       type: "camera",
       pos: cam.pos,
       radius: viewRadius,
@@ -961,7 +920,34 @@ async function main() {
     gl.bindVertexArray(null);
 
     const vtx = gpuMesh.vertexCount;
-    statsEl.textContent = `verts ${vtx.toLocaleString()}  sim ${lastSimStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  epoch ${lastMeshEpoch}  steps ${Math.floor(lastSimTotalSteps).toLocaleString()}`;
+
+    let threadStatus = "thr ?";
+    if (threadInfo && typeof threadInfo === "object") {
+      const threads = Number.isFinite(threadInfo.threads) ? Math.max(1, Math.trunc(threadInfo.threads)) : 1;
+      const reasonMap = {
+        no_sab: "noSAB",
+        not_isolated: "noCOOP/COEP",
+        no_shared_memory: "noSharedMem",
+        no_thread_init: "noInit",
+        init_failed: "initFail",
+        not_requested: "off",
+      };
+      const shortReason = reasonMap[String(threadInfo.reason)] || String(threadInfo.reason || "");
+
+      if (threadInfo.status === "enabled") {
+        threadStatus = `thr ${threads}`;
+      } else if (threadInfo.status === "disabled") {
+        threadStatus = `thr ${threads}${shortReason ? ` (${shortReason})` : ""}`;
+      } else if (threadInfo.status === "unavailable") {
+        threadStatus = `thr ${threads}${shortReason ? ` (mt ${shortReason})` : " (mt n/a)"}`;
+      } else if (threadInfo.status === "failed") {
+        threadStatus = `thr ${threads}${shortReason ? ` (mt ${shortReason})` : " (mt fail)"}`;
+      } else {
+        threadStatus = `thr ${threads}`;
+      }
+    }
+
+    statsEl.textContent = `verts ${vtx.toLocaleString()}  sim ${lastSimStepsPerSec.toFixed(1)} steps/s  mesh ${lastMeshMs.toFixed(1)}ms  ${threadStatus}  epoch ${lastMeshEpoch}  steps ${Math.floor(lastSimTotalSteps).toLocaleString()}`;
 
     requestAnimationFrame(render);
   }

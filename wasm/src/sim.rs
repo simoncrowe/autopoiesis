@@ -240,6 +240,25 @@ impl ScalarFieldMesher {
         self.chunk_max_next.copy_from_slice(chunk_v_max);
     }
 
+    pub fn push_keyframe_from_gray_scott(&mut self, sim: &crate::gray_scott::Simulation) {
+        self.push_keyframe_with_chunk_ranges(
+            sim.v_slice(),
+            sim.chunk_v_min_slice(),
+            sim.chunk_v_max_slice(),
+        );
+    }
+
+    pub fn push_keyframe_from_stochastic_rdme(
+        &mut self,
+        sim: &crate::rdme::StochasticRdmeSimulation,
+    ) {
+        self.push_keyframe_with_chunk_ranges(
+            sim.v_slice(),
+            sim.chunk_v_min_slice(),
+            sim.chunk_v_max_slice(),
+        );
+    }
+
     pub fn generate_mesh_visible(
         &mut self,
         cam_x: f32,
