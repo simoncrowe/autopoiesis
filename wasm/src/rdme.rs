@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use crate::math::clamp01;
+use crate::math::{clamp01, lerp};
 use rayon::prelude::*;
 
 const CHUNK: usize = 16;
@@ -16,6 +16,101 @@ fn wrap(v: isize, n: usize) -> usize {
         x += n;
     }
     x as usize
+}
+
+#[inline(always)]
+fn fade(t: f32) -> f32 {
+    // Quintic smoothstep.
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+#[inline(always)]
+fn hash3(seed: u32, x: i32, y: i32, z: i32) -> u32 {
+    let mut h = seed;
+    h ^= (x as u32).wrapping_mul(0x9E3779B1);
+    h ^= (y as u32).wrapping_mul(0x85EBCA77);
+    h ^= (z as u32).wrapping_mul(0xC2B2AE3D);
+    mix32(h)
+}
+
+#[inline(always)]
+fn grad_from_hash(h: u32) -> [f32; 3] {
+    const G: [[f32; 3]; 12] = [
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [-1.0, -1.0, 0.0],
+        [1.0, 0.0, 1.0],
+        [-1.0, 0.0, 1.0],
+        [1.0, 0.0, -1.0],
+        [-1.0, 0.0, -1.0],
+        [0.0, 1.0, 1.0],
+        [0.0, -1.0, 1.0],
+        [0.0, 1.0, -1.0],
+        [0.0, -1.0, -1.0],
+    ];
+    G[(h % (G.len() as u32)) as usize]
+}
+
+#[inline(always)]
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[inline(always)]
+fn perlin3(seed: u32, x: f32, y: f32, z: f32) -> f32 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let z0 = z.floor() as i32;
+
+    let xf = x - x0 as f32;
+    let yf = y - y0 as f32;
+    let zf = z - z0 as f32;
+
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    let z1 = z0 + 1;
+
+    let u = fade(xf);
+    let v = fade(yf);
+    let w = fade(zf);
+
+    let g000 = grad_from_hash(hash3(seed, x0, y0, z0));
+    let g100 = grad_from_hash(hash3(seed, x1, y0, z0));
+    let g010 = grad_from_hash(hash3(seed, x0, y1, z0));
+    let g110 = grad_from_hash(hash3(seed, x1, y1, z0));
+    let g001 = grad_from_hash(hash3(seed, x0, y0, z1));
+    let g101 = grad_from_hash(hash3(seed, x1, y0, z1));
+    let g011 = grad_from_hash(hash3(seed, x0, y1, z1));
+    let g111 = grad_from_hash(hash3(seed, x1, y1, z1));
+
+    let n000 = dot3(g000, [xf, yf, zf]);
+    let n100 = dot3(g100, [xf - 1.0, yf, zf]);
+    let n010 = dot3(g010, [xf, yf - 1.0, zf]);
+    let n110 = dot3(g110, [xf - 1.0, yf - 1.0, zf]);
+    let n001 = dot3(g001, [xf, yf, zf - 1.0]);
+    let n101 = dot3(g101, [xf - 1.0, yf, zf - 1.0]);
+    let n011 = dot3(g011, [xf, yf - 1.0, zf - 1.0]);
+    let n111 = dot3(g111, [xf - 1.0, yf - 1.0, zf - 1.0]);
+
+    let x00 = lerp(n000, n100, u);
+    let x10 = lerp(n010, n110, u);
+    let x01 = lerp(n001, n101, u);
+    let x11 = lerp(n011, n111, u);
+
+    let y0 = lerp(x00, x10, v);
+    let y1 = lerp(x01, x11, v);
+
+    lerp(y0, y1, w)
+}
+
+#[inline(always)]
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    if e0 >= e1 {
+        return if x >= e0 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - e0) / (e1 - e0)).max(0.0).min(1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[derive(Clone, Copy)]
@@ -356,8 +451,8 @@ impl StochasticRdmeSimulation {
 
         sim.recompute_feed_cache();
 
-        // A reasonable default seed matching prior behavior.
-        sim.seed_spheres(0.05, 20, 50, 0, 0, 25, 20, 0, 0.02);
+        // Default starting condition: perlin-style catalyst blobs.
+        sim.seed_perlin(6.0, 4, 50, 0, 0.0, 20.0);
         sim
     }
 
@@ -470,6 +565,84 @@ impl StochasticRdmeSimulation {
 
     pub fn chunk_v_len(&self) -> usize {
         self.chunk_v_min.len()
+    }
+
+    /// Seeds the lattice with deterministic 3D Perlin-style fractal noise.
+    ///
+    /// This is the recommended default starting condition for RDME because it creates
+    /// large-scale structure without requiring many discrete spheres.
+    ///
+    /// - `frequency`: roughly the number of noise cells across the volume.
+    /// - `octaves`: number of fBm octaves (1..=12).
+    /// - `base_f`: background food.
+    /// - `base_i`: background inhibitor.
+    /// - `a_bias`: constant offset added to catalyst A.
+    /// - `a_amp`: multiplier for catalyst A blobs.
+    pub fn seed_perlin(
+        &mut self,
+        frequency: f32,
+        octaves: u32,
+        base_f: u32,
+        base_i: u32,
+        a_bias: f32,
+        a_amp: f32,
+    ) {
+        let n = self.nx * self.ny * self.nz;
+        if n == 0 {
+            return;
+        }
+
+        let freq = frequency.max(0.0001);
+        let oct = octaves.max(1).min(12);
+
+        let fx = freq / (self.nx.max(1) as f32);
+        let fy = freq / (self.ny.max(1) as f32);
+        let fz = freq / (self.nz.max(1) as f32);
+
+        self.f.fill(base_f as f32);
+        self.i.fill(base_i as f32);
+
+        // Blob shaping similar to the Gray–Scott perlin seeding.
+        let blob_threshold0 = 0.62;
+        let blob_threshold1 = 0.78;
+
+        for z in 0..self.nz {
+            for y in 0..self.ny {
+                for x in 0..self.nx {
+                    let mut f = 1.0;
+                    let mut a = 0.5;
+                    let mut sum = 0.0;
+                    let mut norm = 0.0;
+
+                    for _ in 0..oct {
+                        let nx = x as f32 * fx * f;
+                        let ny = y as f32 * fy * f;
+                        let nz = z as f32 * fz * f;
+                        sum += a * perlin3(self.base_seed, nx, ny, nz);
+                        norm += a;
+                        f *= 2.0;
+                        a *= 0.5;
+                    }
+
+                    // Perlin is approximately in [-1, 1]. Map to [0, 1].
+                    let noise01 = (sum / norm) * 0.5 + 0.5;
+
+                    let mut blob = smoothstep(blob_threshold0, blob_threshold1, noise01);
+                    blob *= blob;
+
+                    // Tiny deterministic grain to break ties / symmetry.
+                    let h = hash3(self.base_seed ^ 0xB10B_C0DE, x as i32, y as i32, z as i32);
+                    let grain01 = ((h >> 8) as f32) / ((1u32 << 24) as f32);
+                    let grain = (grain01 - 0.5) * 0.02;
+
+                    let p = idx(self.nx, self.ny, x, y, z);
+
+                    self.a[p] = (a_bias + a_amp * blob + grain * blob).max(0.0);
+                }
+            }
+        }
+
+        self.update_aliveness_field();
     }
 
     /// Seed the lattice with a background concentration and random catalyst spheres.

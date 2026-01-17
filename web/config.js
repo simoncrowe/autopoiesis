@@ -208,6 +208,19 @@ export function createHudController({
       ],
       seedings: [
         {
+          id: "perlin",
+          name: "Perlin noise",
+          config: {
+            type: "perlin",
+            frequency: 6.0,
+            octaves: 4,
+            baseF: 50,
+            baseI: 0,
+            aBias: 0.0,
+            aAmp: 20.0,
+          },
+        },
+        {
           id: "spheres",
           name: "Catalyst spheres + noise",
           config: {
