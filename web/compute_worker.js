@@ -589,7 +589,16 @@ async function restartSimulation() {
     sim.set_dt(Number(simConfig.dt ?? 0.05));
 
     const seeding = simConfig.seeding ?? {};
-    if (!seeding.type || seeding.type === "spheres") {
+    if (!seeding.type || seeding.type === "perlin") {
+      sim.seed_perlin(
+        Number(seeding.frequency ?? 6.0),
+        toU32(seeding.octaves, 4),
+        toU32(seeding.baseF, 50),
+        toU32(seeding.baseI, 0),
+        Number(seeding.aBias ?? 0.0),
+        Number(seeding.aAmp ?? 20.0),
+      );
+    } else if (seeding.type === "spheres") {
       sim.seed_spheres(
         Number(seeding.radius01 ?? 0.05),
         toU32(seeding.sphereCount, 20),
