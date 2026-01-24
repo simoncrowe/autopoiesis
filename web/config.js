@@ -440,7 +440,7 @@ export function createHudController({
       name: "Continuous CA (Lenia)",
       params: [
         { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 64, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: 0.10, requiresRestart: false },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: 0.010, requiresRestart: false },
         { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
 
         { key: "radius", path: ["params", "radius"], label: "Kernel radius (R)", min: 1, max: 10, step: 1, defaultValue: 5, requiresRestart: true },

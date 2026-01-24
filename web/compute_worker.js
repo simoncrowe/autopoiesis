@@ -810,7 +810,7 @@ async function restartSimulation() {
     params.set_kernel_sharpness(Number(simConfig.params?.sharpness ?? 1.0));
 
     sim = new LeniaSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.10));
+    sim.set_dt(Number(simConfig.dt ?? 0.010));
 
     const seeding = simConfig.seeding ?? {};
     if (!seeding.type || seeding.type === "noise") {

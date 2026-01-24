@@ -103,17 +103,6 @@ impl LeniaParams {
 
 const GROWTH_LUT_SIZE: usize = 2048;
 
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[inline(always)]
-unsafe fn v128_f32_sum4(v: v128) -> f32 {
-    // Horizontal sum of 4 f32 lanes.
-    let shuf1 = i32x4_shuffle::<2, 3, 0, 1>(v, v);
-    let sum1 = f32x4_add(v, shuf1);
-    let shuf2 = i32x4_shuffle::<1, 0, 3, 2>(sum1, sum1);
-    let sum2 = f32x4_add(sum1, shuf2);
-    f32x4_extract_lane::<0>(sum2)
-}
-
 #[derive(Clone, Copy)]
 struct KernelTap {
     // Indices are pre-shifted to [0, 2R] so the inner loop avoids add/cast.
@@ -550,86 +539,111 @@ impl LeniaSimulation {
             for y in 0..ny {
                 let y_off = z_off + y * nx;
                 let row = y * nx;
-                for x in 0..nx {
+                let mut x = 0usize;
+                while x < nx {
                     let c = y_off + x;
                     let a = a0[c];
-
-                    // Convolution: use precomputed wrap tables for dx/dy/dz.
-                    // SIMD fast path reduces scalar loop overhead (gather still dominates).
-                    let mut u = 0.0f32;
 
                     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                     {
                         unsafe {
-                            let mut acc = f32x4_splat(0.0);
-                            let mut i = 0usize;
-                            let len = kernel.len();
-                            while i + 4 <= len {
-                                // Load 4 taps (scalar -> SIMD).
-                                let t0 = kernel[i];
-                                let t1 = kernel[i + 1];
-                                let t2 = kernel[i + 2];
-                                let t3 = kernel[i + 3];
+                            // Heavy SIMD path: process 4 voxels along x together so most kernel
+                            // taps become contiguous loads (except near wrap boundaries).
+                            // This is where SIMD starts paying off in 3D.
+                            if x + 3 < nx {
+                                let base_center = y_off + x;
+                                let a_center =
+                                    v128_load(a0.as_ptr().add(base_center) as *const v128);
 
-                                let xx0 = xwrap[(t0.ix as usize) * nx + x] as usize;
-                                let yy0 = ywrap[(t0.iy as usize) * ny + y] as usize;
-                                let zz0 = zwrap[(t0.iz as usize) * nz + z] as usize;
+                                let mut u4 = f32x4_splat(0.0);
 
-                                let xx1 = xwrap[(t1.ix as usize) * nx + x] as usize;
-                                let yy1 = ywrap[(t1.iy as usize) * ny + y] as usize;
-                                let zz1 = zwrap[(t1.iz as usize) * nz + z] as usize;
+                                for kt in kernel {
+                                    let yy = ywrap[(kt.iy as usize) * ny + y] as usize;
+                                    let zz = zwrap[(kt.iz as usize) * nz + z] as usize;
+                                    let base = zz * nxy + yy * nx;
 
-                                let xx2 = xwrap[(t2.ix as usize) * nx + x] as usize;
-                                let yy2 = ywrap[(t2.iy as usize) * ny + y] as usize;
-                                let zz2 = zwrap[(t2.iz as usize) * nz + z] as usize;
+                                    let base_ix = (kt.ix as usize) * nx + x;
+                                    let xx0 = xwrap[base_ix] as usize;
+                                    let xx1 = xwrap[base_ix + 1] as usize;
+                                    let xx2 = xwrap[base_ix + 2] as usize;
+                                    let xx3 = xwrap[base_ix + 3] as usize;
 
-                                let xx3 = xwrap[(t3.ix as usize) * nx + x] as usize;
-                                let yy3 = ywrap[(t3.iy as usize) * ny + y] as usize;
-                                let zz3 = zwrap[(t3.iz as usize) * nz + z] as usize;
+                                    let a_vec =
+                                        if xx1 == xx0 + 1 && xx2 == xx0 + 2 && xx3 == xx0 + 3 {
+                                            // Fast contiguous load.
+                                            v128_load(a0.as_ptr().add(base + xx0) as *const v128)
+                                        } else {
+                                            // Fallback gather.
+                                            f32x4(
+                                                a0[base + xx0],
+                                                a0[base + xx1],
+                                                a0[base + xx2],
+                                                a0[base + xx3],
+                                            )
+                                        };
 
-                                let a_vec = f32x4(
-                                    a0[idx(nx, ny, xx0, yy0, zz0)],
-                                    a0[idx(nx, ny, xx1, yy1, zz1)],
-                                    a0[idx(nx, ny, xx2, yy2, zz2)],
-                                    a0[idx(nx, ny, xx3, yy3, zz3)],
-                                );
+                                    let w = f32x4_splat(kt.w);
+                                    u4 = f32x4_add(u4, f32x4_mul(w, a_vec));
+                                }
 
-                                let w_vec = f32x4(t0.w, t1.w, t2.w, t3.w);
-                                acc = f32x4_add(acc, f32x4_mul(w_vec, a_vec));
+                                // Per-lane LUT growth + writeback.
+                                // Unrolled to avoid dynamic-lane shuffles.
+                                let u0 = f32x4_extract_lane::<0>(u4);
+                                let u1 = f32x4_extract_lane::<1>(u4);
+                                let u2 = f32x4_extract_lane::<2>(u4);
+                                let u3 = f32x4_extract_lane::<3>(u4);
 
-                                i += 4;
-                            }
+                                let a0c = f32x4_extract_lane::<0>(a_center);
+                                let a1c = f32x4_extract_lane::<1>(a_center);
+                                let a2c = f32x4_extract_lane::<2>(a_center);
+                                let a3c = f32x4_extract_lane::<3>(a_center);
 
-                            u += v128_f32_sum4(acc);
+                                let lanes = [
+                                    (0usize, u0, a0c),
+                                    (1usize, u1, a1c),
+                                    (2usize, u2, a2c),
+                                    (3usize, u3, a3c),
+                                ];
+                                for (lane, u, a) in lanes {
+                                    let u01 = u.max(0.0).min(1.0);
+                                    let tt = u01 * lut_scale;
+                                    let i0 = tt as usize;
+                                    let i1 = (i0 + 1).min(GROWTH_LUT_SIZE - 1);
+                                    let ff = tt - (i0 as f32);
+                                    let g = lut[i0] + (lut[i1] - lut[i0]) * ff;
 
-                            while i < len {
-                                let t = kernel[i];
-                                let xx = xwrap[(t.ix as usize) * nx + x] as usize;
-                                let yy = ywrap[(t.iy as usize) * ny + y] as usize;
-                                let zz = zwrap[(t.iz as usize) * nz + z] as usize;
-                                u += t.w * a0[idx(nx, ny, xx, yy, zz)];
-                                i += 1;
+                                    let mut an = a + dt * g;
+                                    if !an.is_finite() {
+                                        an = 0.0;
+                                    }
+                                    an = an.max(0.0).min(1.0);
+
+                                    a1z[row + x + lane] = an;
+                                }
+
+                                x += 4;
+                                continue;
                             }
                         }
                     }
 
-                    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
-                    {
-                        for t in kernel {
-                            let xx = xwrap[(t.ix as usize) * nx + x] as usize;
-                            let yy = ywrap[(t.iy as usize) * ny + y] as usize;
-                            let zz = zwrap[(t.iz as usize) * nz + z] as usize;
-                            u += t.w * a0[idx(nx, ny, xx, yy, zz)];
-                        }
+                    // Scalar fallback (including tail x positions).
+                    let mut u = 0.0f32;
+                    for kt in kernel {
+                        let xx = xwrap[(kt.ix as usize) * nx + x] as usize;
+                        let yy = ywrap[(kt.iy as usize) * ny + y] as usize;
+                        let zz = zwrap[(kt.iz as usize) * nz + z] as usize;
+                        u += kt.w * a0[idx(nx, ny, xx, yy, zz)];
                     }
 
-                    // Growth function via LUT (avoid exp() in the hot loop).
+                    // (Scalar path) x advances by 1 at the end of the loop.
+
                     let u01 = u.max(0.0).min(1.0);
-                    let t = u01 * lut_scale;
-                    let i0 = t as usize;
+                    let tt = u01 * lut_scale;
+                    let i0 = tt as usize;
                     let i1 = (i0 + 1).min(GROWTH_LUT_SIZE - 1);
-                    let f = t - (i0 as f32);
-                    let g = lut[i0] + (lut[i1] - lut[i0]) * f;
+                    let ff = tt - (i0 as f32);
+                    let g = lut[i0] + (lut[i1] - lut[i0]) * ff;
 
                     let mut an = a + dt * g;
                     if !an.is_finite() {
@@ -638,6 +652,7 @@ impl LeniaSimulation {
                     an = an.max(0.0).min(1.0);
 
                     a1z[row + x] = an;
+                    x += 1;
                 }
             }
         });
