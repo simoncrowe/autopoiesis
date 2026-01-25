@@ -1,9 +1,26 @@
 import { FlyCamera, createMouseFlightController } from "./camera.js";
 import { createAoBlurProgram, createAoCompositeProgram, createAoProgram, createMeshProgram } from "./shaders.js";
 import { createHudController } from "./config.js";
+import { bootAudio, ensureGlobalReverb, isAudioBooted, noteOn, setReverb } from "./synth.js";
+import { createMusicEngine, mapMaxToReverbRoom, mapMeanToCutoff } from "./music.js";
 
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
+const audioBootBtn = document.querySelector("#audioBoot");
+const audioTestBtn = document.querySelector("#audioTest");
+const audioMusicBtn = document.querySelector("#audioMusic");
+const audioStatusEl = document.querySelector("#audioStatus");
+const audioStatsEl = document.querySelector("#audioStats");
+
+function setAudioStatus(text) {
+  if (!audioStatusEl) return;
+  audioStatusEl.textContent = text ? `(${text})` : "";
+}
+
+function setAudioStats(text) {
+  if (!audioStatsEl) return;
+  audioStatsEl.textContent = text || "";
+}
 
 function resizeCanvasToDisplaySize(c) {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -398,6 +415,13 @@ async function main() {
         return;
       }
 
+      // Future: camera neighbourhood scalar stats (normalized 0..1)
+      if (msg.type === "camera_voxel_stats") {
+        if (Number.isFinite(msg.mean)) statsTarget.mean = Math.max(0, Math.min(1, msg.mean));
+        if (Number.isFinite(msg.max)) statsTarget.max = Math.max(0, Math.min(1, msg.max));
+        return;
+      }
+
       if (msg.type === "mesh") {
         uploadMeshFromBuffers(gl, gpuMesh, msg);
         lastMeshMs = msg.meshMs || 0;
@@ -412,9 +436,81 @@ async function main() {
     };
   }
 
+  // Smoothed camera-neighbourhood stats (normalized 0..1).
+  // Must be initialized before `createHudController` triggers the first worker start.
+  const statsTarget = { mean: 0.5, max: 0.5 };
+  const statsSmooth = { mean: 0.5, max: 0.5 };
+  const SMOOTH_TAU_S = 0.75;
+
+  const updateSmoothedStats = (dt) => {
+    const a = 1 - Math.exp(-Math.max(0, dt) / SMOOTH_TAU_S);
+    statsSmooth.mean += (statsTarget.mean - statsSmooth.mean) * a;
+    statsSmooth.max += (statsTarget.max - statsSmooth.max) * a;
+  };
+
   const hud = createHudController({
     onRestart: (seed, simConfig) => startWorkers(seed, simConfig),
     getWorker: () => computeWorker,
+  });
+
+  const music = createMusicEngine({
+    bpm: 60,
+    seed: 1,
+    // Easy toggle: set to `true` to switch back to arpeggiation.
+    arpeggiate: false,
+    onNote: (midiNote) => {
+      const cutoff = mapMeanToCutoff(statsSmooth.mean);
+      noteOn({
+        note: midiNote,
+        amp: 0.18,
+        release: 0.28,
+        cutoff,
+      });
+    },
+    getNoteParams: () => ({}),
+  });
+
+  const refreshAudioUi = () => {
+    const ok = isAudioBooted();
+    if (audioTestBtn) audioTestBtn.disabled = !ok;
+    if (audioMusicBtn) audioMusicBtn.disabled = !ok;
+    if (audioMusicBtn) audioMusicBtn.textContent = music.running ? "Stop music" : "Start music";
+    setAudioStatus(ok ? (music.running ? "music" : "ready") : "off");
+  };
+
+  refreshAudioUi();
+
+  audioBootBtn?.addEventListener("click", async () => {
+    try {
+      setAudioStatus("booting...");
+      await bootAudio();
+      await ensureGlobalReverb();
+      refreshAudioUi();
+    } catch (e) {
+      console.error(e);
+      setAudioStatus("error");
+    }
+  });
+
+  audioTestBtn?.addEventListener("click", () => {
+    try {
+      // A slightly low note so it's clearly audible.
+      noteOn({ note: 48, amp: 0.25, release: 2.5, cutoff: 75 });
+    } catch (e) {
+      console.error(e);
+      refreshAudioUi();
+    }
+  });
+
+  audioMusicBtn?.addEventListener("click", () => {
+    try {
+      if (music.running) music.stop();
+      else music.start();
+      refreshAudioUi();
+    } catch (e) {
+      console.error(e);
+      refreshAudioUi();
+    }
   });
 
   // Camera -> worker updates.
@@ -462,6 +558,10 @@ async function main() {
   }
 
   let lastT = performance.now();
+  let lastReverbAt = 0;
+  let lastAudioHudAt = 0;
+  let lastReverbRoom = null;
+  let lastReverbMix = null;
   function render(tNow) {
     const dt = Math.min(0.05, (tNow - lastT) / 1000);
     lastT = tNow;
@@ -472,6 +572,34 @@ async function main() {
 
     cameraController.update(dt);
     sendCamera();
+
+    updateSmoothedStats(dt);
+    if (isAudioBooted()) {
+      if (tNow - lastReverbAt > 200) {
+        const room = mapMaxToReverbRoom(statsSmooth.max);
+        const mix = 0.2 + 0.35 * room;
+
+        const roomChanged = lastReverbRoom === null || Math.abs(room - lastReverbRoom) > 0.01;
+        const mixChanged = lastReverbMix === null || Math.abs(mix - lastReverbMix) > 0.01;
+        if (roomChanged || mixChanged) {
+          lastReverbAt = tNow;
+          lastReverbRoom = room;
+          lastReverbMix = mix;
+          setReverb({ room, mix });
+        }
+      }
+    }
+
+    if (tNow - lastAudioHudAt > 100) {
+      lastAudioHudAt = tNow;
+      const cutoff = mapMeanToCutoff(statsSmooth.mean);
+      const room = mapMaxToReverbRoom(statsSmooth.max);
+      const mix = 0.2 + 0.35 * room;
+      setAudioStats(
+        `mean ${statsSmooth.mean.toFixed(3)}  max ${statsSmooth.max.toFixed(3)}\n` +
+        `cutoff ${cutoff.toFixed(1)}  reverb room ${room.toFixed(3)}  mix ${mix.toFixed(3)}  amp ${0.18.toFixed(2)}`,
+      );
+    }
 
     const fovyRad = (60 * Math.PI) / 180;
     const tanHalfFovy = Math.tan(fovyRad / 2);

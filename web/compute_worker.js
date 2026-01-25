@@ -76,6 +76,85 @@ let totalSteps = 0;
 let stepsWindow = 0;
 let lastRateAt = 0;
 
+let lastVoxelStatsAt = 0;
+const VOXEL_STATS_INTERVAL_MS = 200;
+const VOXEL_STATS_SIDE = 16;
+const VOXEL_STATS_HALF = Math.floor(VOXEL_STATS_SIDE / 2);
+
+function clampInt(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v | 0));
+}
+
+function cameraPosToGridIndex(pos, dims) {
+  // Simulation volume is treated as centered on origin, spanning [-0.5, 0.5] in each axis.
+  // (Matches how the camera is initialized and how visible-mesh generation is parameterized.)
+  const x = clampInt(Math.floor((Number(pos[0]) + 0.5) * dims), 0, dims - 1);
+  const y = clampInt(Math.floor((Number(pos[1]) + 0.5) * dims), 0, dims - 1);
+  const z = clampInt(Math.floor((Number(pos[2]) + 0.5) * dims), 0, dims - 1);
+  return [x, y, z];
+}
+
+function getScalarFieldView() {
+  if (!wasm || !sim) return null;
+  if (typeof sim.v_ptr !== "function" || typeof sim.v_len !== "function") return null;
+  const ptr = sim.v_ptr();
+  const len = sim.v_len();
+  if (!Number.isFinite(ptr) || !Number.isFinite(len) || len <= 0) return null;
+  return new Float32Array(wasm.memory.buffer, ptr, len);
+}
+
+function maybePublishCameraVoxelStats() {
+  const now = performance.now();
+  if (lastVoxelStatsAt !== 0 && now - lastVoxelStatsAt < VOXEL_STATS_INTERVAL_MS) return;
+  lastVoxelStatsAt = now;
+
+  const v = getScalarFieldView();
+  if (!v) return;
+  if (!Number.isFinite(dims) || dims <= 0) return;
+
+  const [cx, cy, cz] = cameraPosToGridIndex(camPos, dims);
+
+  const x0 = clampInt(cx - VOXEL_STATS_HALF, 0, dims - 1);
+  const x1 = clampInt(x0 + VOXEL_STATS_SIDE - 1, 0, dims - 1);
+  const y0 = clampInt(cy - VOXEL_STATS_HALF, 0, dims - 1);
+  const y1 = clampInt(y0 + VOXEL_STATS_SIDE - 1, 0, dims - 1);
+  const z0 = clampInt(cz - VOXEL_STATS_HALF, 0, dims - 1);
+  const z1 = clampInt(z0 + VOXEL_STATS_SIDE - 1, 0, dims - 1);
+
+  let n = 0;
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+
+  for (let z = z0; z <= z1; z++) {
+    const zBase = dims * dims * z;
+    for (let y = y0; y <= y1; y++) {
+      const base = zBase + dims * y;
+      for (let x = x0; x <= x1; x++) {
+        const s = clamp01(v[base + x]);
+        n++;
+        sum += s;
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+    }
+  }
+
+  if (n <= 0) return;
+
+  const mean = sum / n;
+  self.postMessage({
+    type: "camera_voxel_stats",
+    dims,
+    center: [cx, cy, cz],
+    side: VOXEL_STATS_SIDE,
+    mean,
+    min,
+    max,
+    range: max - min,
+  });
+}
+
 function clamp01(v) {
   return Math.max(0, Math.min(1, v));
 }
@@ -542,6 +621,7 @@ function loop() {
   }
 
   updateStepsPerSecondStats();
+  maybePublishCameraVoxelStats();
   maybeBuildMesh();
 
   loopTimer = setTimeout(loop, 0);
