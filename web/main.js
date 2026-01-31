@@ -3,6 +3,7 @@ import { createAoBlurProgram, createAoCompositeProgram, createAoProgram, createM
 import { createHudController } from "./config.js";
 import { bootAudio, ensureGlobalReverb, isAudioBooted, noteOn, setFilter, setReverb } from "./synth.js";
 import { DRONE_PROGRESSION, createMusicEngine, mapMaxToReverbRoom, mapMeanToCutoff } from "./music.js";
+import { MSG_TYPES } from "./msg_types.js";
 
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
@@ -72,7 +73,7 @@ function createMeshGpu(gl) {
 
 function uploadMeshFromBuffers(gl, gpuMesh, msg) {
   const pos = new Float32Array(msg.positions);
-  const nor = new Float32Array(msg.normals);
+  const normals = new Float32Array(msg.normals);
   const col = new Float32Array(msg.colors);
   const idx = new Uint32Array(msg.indices);
 
@@ -82,7 +83,7 @@ function uploadMeshFromBuffers(gl, gpuMesh, msg) {
   gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, gpuMesh.norBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, nor, gl.DYNAMIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, normals, gl.DYNAMIC_DRAW);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, gpuMesh.colBuf);
   gl.bufferData(gl.ARRAY_BUFFER, col, gl.DYNAMIC_DRAW);
@@ -319,7 +320,7 @@ async function main() {
       : undefined;
 
     computeWorker.postMessage({
-      type: "init",
+      type: MSG_TYPES.INIT,
       seed,
       dims,
       simConfig,
@@ -330,38 +331,38 @@ async function main() {
       const msg = e.data;
       if (!msg || typeof msg !== "object") return;
 
-      if (msg.type === "sim_ready") return;
-      if (msg.type === "mesh_ready") {
+      if (msg.type === MSG_TYPES.SIM_READY) return;
+      if (msg.type === MSG_TYPES.MESH_READY) {
         workerReady = true;
         return;
       }
 
-      if (msg.type === "thread_info") {
+      if (msg.type === MSG_TYPES.THREAD_INFO) {
         threadInfo = msg;
         return;
       }
 
-      if (msg.type === "sim_stats") {
+      if (msg.type === MSG_TYPES.SIM_STATS) {
         lastSimStepsPerSec = msg.stepsPerSec || 0;
         lastSimTotalSteps = msg.totalSteps || 0;
         return;
       }
 
       // Future: camera neighbourhood scalar stats (normalized 0..1)
-      if (msg.type === "camera_voxel_stats") {
+      if (msg.type === MSG_TYPES.CAMERA_VOXEL_STATS) {
         if (Number.isFinite(msg.mean)) statsTarget.mean = Math.max(0, Math.min(1, msg.mean));
         if (Number.isFinite(msg.max)) statsTarget.max = Math.max(0, Math.min(1, msg.max));
         return;
       }
 
-      if (msg.type === "mesh") {
+      if (msg.type === MSG_TYPES.MESH) {
         uploadMeshFromBuffers(gl, gpuMesh, msg);
         lastMeshMs = msg.meshMs || 0;
         lastMeshEpoch = msg.epoch || 0;
         return;
       }
 
-      if (msg.type === "error") {
+      if (msg.type === MSG_TYPES.ERROR) {
         console.error(msg.message);
         if (statsEl) statsEl.textContent = String(msg.message);
       }
@@ -508,7 +509,7 @@ async function main() {
 
     const camSettings = hud.getCameraSettings();
     computeWorker.postMessage({
-      type: "camera",
+      type: MSG_TYPES.CAMERA,
       pos: cam.pos,
       radius: camSettings.radius,
       iso: camSettings.iso,

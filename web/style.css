@@ -120,6 +120,11 @@ body {
   gap: 8px;
 }
 
+/* Ensure the HTML `hidden` attribute always wins over layout rules. */
+[hidden] {
+  display: none !important;
+}
+
 .menuPanels button {
   align-self: flex-start;
 }

@@ -1,3 +1,14 @@
+import { MSG_TYPES } from "./msg_types.js";
+import {
+  GRAY_SCOTT_DEFAULTS,
+  STOCHASTIC_RDME_DEFAULTS,
+  CAHN_HILLIARD_DEFAULTS,
+  EXCITABLE_MEDIA_DEFAULTS,
+  REPLICATOR_MUTATOR_DEFAULTS,
+  LENIA_DEFAULTS,
+} from "./sim_defaults.js";
+import { WORKER_TUNING } from "./worker_tuning.js";
+
 import init, {
   GrayScottParams,
   Simulation,
@@ -17,14 +28,12 @@ import init, {
 } from "../wasm/web/pkg/autopoiesis.js";
 
 const DEFAULT_DIMS = 192;
-const DEFAULT_TICKS_PER_SECOND = 5;
+const DEFAULT_TICKS_PER_SECOND = GRAY_SCOTT_DEFAULTS.ticksPerSecond;
 
-// Run the simulation as fast as possible, but only publish snapshots at `periodMs`.
-// Meshing interpolates between the most recent two published snapshots.
-const STEP_TIME_SLICE_MS = 12;
-const STEP_BATCH = 8;
+const STEP_TIME_SLICE_MS = WORKER_TUNING.stepTimeSliceMs;
+const STEP_BATCH = WORKER_TUNING.stepBatch;
 
-const MESH_INTERVAL_MS = 16;
+const MESH_INTERVAL_MS = WORKER_TUNING.meshIntervalMs;
 
 let wasm;
 
@@ -40,17 +49,11 @@ let periodMs = Math.max(1, Math.round(1000 / ticksPerSecond));
 let currentSeed = 1337;
 let simConfig = {
   strategyId: "gray_scott",
-  params: { du: 0.16, dv: 0.08, feed: 0.037, kill: 0.06 },
-  dt: 0.1,
-  ticksPerSecond: DEFAULT_TICKS_PER_SECOND,
-  seeding: {
-    type: "classic",
-    noiseAmp: 0.01,
-    sphereCount: 20,
-    sphereRadius01: 0.05,
-    u: 0.5,
-    v: 0.25,
-  },
+  params: { ...GRAY_SCOTT_DEFAULTS.params },
+  dt: GRAY_SCOTT_DEFAULTS.dt,
+  ticksPerSecond: GRAY_SCOTT_DEFAULTS.ticksPerSecond,
+  seeding: { ...GRAY_SCOTT_DEFAULTS.seeding },
+  exportMode: null,
 };
 
 let camPos = [0, 0, 0.25];
@@ -79,12 +82,18 @@ let lastRateAt = 0;
 let lastVoxelStatsAt = 0;
 // Keep latency low for audio control. This samples a 16^3 neighbourhood (~4k reads),
 // so 20Hz is a good default.
-const VOXEL_STATS_INTERVAL_MS = 50;
-const VOXEL_STATS_SIDE = 6;
+const VOXEL_STATS_INTERVAL_MS = WORKER_TUNING.voxelStatsIntervalMs;
+const VOXEL_STATS_SIDE = WORKER_TUNING.voxelStatsSide;
 const VOXEL_STATS_HALF = Math.floor(VOXEL_STATS_SIDE / 2);
 
 function clampInt(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v | 0));
+}
+
+function clampFiniteNumber(v, fallback, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(lo, Math.min(hi, n));
 }
 
 function cameraPosToGridIndex(pos, dims) {
@@ -146,7 +155,7 @@ function maybePublishCameraVoxelStats() {
 
   const mean = sum / n;
   self.postMessage({
-    type: "camera_voxel_stats",
+    type: MSG_TYPES.CAMERA_VOXEL_STATS,
     dims,
     center: [cx, cy, cz],
     side: VOXEL_STATS_SIDE,
@@ -297,12 +306,12 @@ function gradMagToT(gradMag) {
   return 1 - Math.exp(-g * gradMagGain);
 }
 
-function recolorByGradientMagnitude(normals, colors) {
+function recolorByGradientMagnitude(grads, colors) {
   // Leave other sims as-is.
   // CH tends to produce much larger scalar gradients at the phase boundary, which
   // makes the ramp saturate. We apply a cheap per-strategy remap to keep the
   // control usable without changing the global behavior.
-  const vertexCount = Math.floor(normals.length / 3);
+  const vertexCount = Math.floor(grads.length / 3);
   if (vertexCount <= 0) return;
 
   const alpha = colors.length >= 4 ? colors[3] : 1;
@@ -310,9 +319,9 @@ function recolorByGradientMagnitude(normals, colors) {
   const k = simKind === "cahn_hilliard" ? 0.15 : 1.0;
 
   for (let i = 0; i < vertexCount; i++) {
-    const nx = normals[i * 3 + 0];
-    const ny = normals[i * 3 + 1];
-    const nz = normals[i * 3 + 2];
+    const nx = grads[i * 3 + 0];
+    const ny = grads[i * 3 + 1];
+    const nz = grads[i * 3 + 2];
     const g = Math.hypot(nx, ny, nz) * k;
     const t = gradMagToT(g);
     const [r, gg, b] = ACTIVE_RAMP(t);
@@ -363,8 +372,13 @@ function mergeSimConfig(update) {
 
   if (typeof update.strategyId === "string") simConfig.strategyId = update.strategyId;
 
-  if (typeof update.dt === "number") simConfig.dt = update.dt;
-  if (typeof update.ticksPerSecond === "number") simConfig.ticksPerSecond = update.ticksPerSecond;
+  if (typeof update.dt === "number") {
+    simConfig.dt = clampFiniteNumber(update.dt, simConfig.dt, 0.000001, 10.0);
+  }
+
+  if (typeof update.ticksPerSecond === "number") {
+    simConfig.ticksPerSecond = clampFiniteNumber(update.ticksPerSecond, simConfig.ticksPerSecond, 1, 120);
+  }
 
   if (update.params && typeof update.params === "object") {
     simConfig.params = {
@@ -408,7 +422,7 @@ async function ensureWasm(threadCount) {
     else if (!hasThreadInit) reason = "no_thread_init";
 
     self.postMessage({
-      type: "thread_info",
+      type: MSG_TYPES.THREAD_INFO,
       status: "unavailable",
       reason,
       requestedThreads,
@@ -432,7 +446,7 @@ async function ensureWasm(threadCount) {
 
   if (requestedThreads <= 0) {
     self.postMessage({
-      type: "thread_info",
+      type: MSG_TYPES.THREAD_INFO,
       status: "disabled",
       reason: "not_requested",
       requestedThreads,
@@ -459,7 +473,7 @@ async function ensureWasm(threadCount) {
     }
 
     self.postMessage({
-      type: "thread_info",
+      type: MSG_TYPES.THREAD_INFO,
       status: "enabled",
       reason: "ok",
       requestedThreads,
@@ -474,7 +488,7 @@ async function ensureWasm(threadCount) {
     console.error("init_thread_pool failed; continuing single-threaded", e);
 
     self.postMessage({
-      type: "thread_info",
+      type: MSG_TYPES.THREAD_INFO,
       status: "failed",
       reason: "init_failed",
       requestedThreads,
@@ -487,7 +501,7 @@ async function ensureWasm(threadCount) {
     });
 
     self.postMessage({
-      type: "error",
+      type: MSG_TYPES.ERROR,
       message:
         "Failed to start Wasm thread pool. Ensure the page is crossOriginIsolated (COOP/COEP headers) and rebuild with shared-memory enabled.",
     });
@@ -570,17 +584,17 @@ function maybeBuildMesh() {
   lastMeshAt = performance.now();
 
   const positions = copyFloat32(mesher.mesh_positions_ptr(), mesher.mesh_positions_len());
-  const normals = copyFloat32(mesher.mesh_normals_ptr(), mesher.mesh_normals_len());
+  const grads = copyFloat32(mesher.mesh_normals_ptr(), mesher.mesh_normals_len());
   const colors = copyFloat32(mesher.mesh_colors_ptr(), mesher.mesh_colors_len());
   const indices = copyU32(mesher.mesh_indices_ptr(), mesher.mesh_indices_len());
 
-  recolorByGradientMagnitude(normals, colors);
+  recolorByGradientMagnitude(grads, colors);
 
   self.postMessage(
     {
-      type: "mesh",
+      type: MSG_TYPES.MESH,
       positions: positions.buffer,
-      normals: normals.buffer,
+      normals: grads.buffer,
       colors: colors.buffer,
       indices: indices.buffer,
       indexCount: indices.length,
@@ -588,7 +602,7 @@ function maybeBuildMesh() {
       meshMs,
       epoch: lastKeyframeEpoch,
     },
-    [positions.buffer, normals.buffer, colors.buffer, indices.buffer],
+    [positions.buffer, grads.buffer, colors.buffer, indices.buffer],
   );
 }
 
@@ -602,7 +616,42 @@ function updateStepsPerSecondStats() {
   const stepsPerSec = stepsWindow / (elapsed / 1000);
   stepsWindow = 0;
   lastRateAt = now;
-  self.postMessage({ type: "sim_stats", stepsPerSec, totalSteps });
+  self.postMessage({ type: MSG_TYPES.SIM_STATS, stepsPerSec, totalSteps });
+}
+
+function cahnHilliardExportModeToId(modeId) {
+  if (modeId === "phase") return 0;
+  if (modeId === "membranes") return 1;
+  if (modeId === "phase_tanh") return 2;
+  if (modeId === "energy") return 3;
+  return null;
+}
+
+function cahnHilliardExportGainForModeId(modeId) {
+  if (modeId === "phase") return 6.0;
+  if (modeId === "phase_tanh") return 0.6;
+  if (modeId === "membranes") return 4.0;
+  if (modeId === "energy") return 2.0;
+  return null;
+}
+
+function applyCahnHilliardExportMode(sim, modeId, seedingType) {
+  if (!sim || typeof sim.set_export_mode !== "function") return;
+
+  let selected = modeId;
+  if (!selected) {
+    if (!seedingType || seedingType === "spinodal" || seedingType === "droplets") selected = "phase_tanh";
+    else if (seedingType === "membranes") selected = "membranes";
+    else if (seedingType === "energy") selected = "energy";
+    else throw new Error(`unknown cahn-hilliard seeding type: ${String(seedingType)}`);
+  }
+
+  const mode = cahnHilliardExportModeToId(selected);
+  if (mode === null) return;
+  sim.set_export_mode(mode);
+
+  const gain = cahnHilliardExportGainForModeId(selected);
+  if (gain !== null && typeof sim.set_export_gain === "function") sim.set_export_gain(gain);
 }
 
 function loop() {
@@ -643,21 +692,21 @@ async function restartSimulation() {
 
   if (strategyId === "gray_scott") {
     const params = new GrayScottParams();
-    params.set_du(Number(simConfig.params?.du ?? 0.16));
-    params.set_dv(Number(simConfig.params?.dv ?? 0.08));
-    params.set_feed(Number(simConfig.params?.feed ?? 0.037));
-    params.set_kill(Number(simConfig.params?.kill ?? 0.06));
+    params.set_du(Number(simConfig.params?.du ?? GRAY_SCOTT_DEFAULTS.params.du));
+    params.set_dv(Number(simConfig.params?.dv ?? GRAY_SCOTT_DEFAULTS.params.dv));
+    params.set_feed(Number(simConfig.params?.feed ?? GRAY_SCOTT_DEFAULTS.params.feed));
+    params.set_kill(Number(simConfig.params?.kill ?? GRAY_SCOTT_DEFAULTS.params.kill));
 
     sim = new Simulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.1));
+    sim.set_dt(Number(simConfig.dt ?? GRAY_SCOTT_DEFAULTS.dt));
 
     const seeding = simConfig.seeding ?? {};
     if (seeding.type === "perlin") {
       sim.seed_perlin(
-        Number(seeding.frequency ?? 6.0),
-        Number(seeding.octaves ?? 4),
-        Number(seeding.v_bias ?? 0.0),
-        Number(seeding.v_amp ?? 1.0),
+        Number(seeding.frequency ?? GRAY_SCOTT_DEFAULTS.seeding.frequency),
+        Number(seeding.octaves ?? GRAY_SCOTT_DEFAULTS.seeding.octaves),
+        Number(seeding.v_bias ?? GRAY_SCOTT_DEFAULTS.seeding.v_bias),
+        Number(seeding.v_amp ?? GRAY_SCOTT_DEFAULTS.seeding.v_amp),
       );
     } else if (seeding.type === "classic") {
       seedClassic(sim, dims, currentSeed, seeding);
@@ -667,44 +716,44 @@ async function restartSimulation() {
   } else if (strategyId === "stochastic_rdme") {
     const params = new StochasticRdmeParams();
 
-    params.set_df(Number(simConfig.params?.df ?? 0.2));
-    params.set_da(Number(simConfig.params?.da ?? 0.05));
-    params.set_di(Number(simConfig.params?.di ?? 0.02));
+    params.set_df(Number(simConfig.params?.df ?? STOCHASTIC_RDME_DEFAULTS.params.df));
+    params.set_da(Number(simConfig.params?.da ?? STOCHASTIC_RDME_DEFAULTS.params.da));
+    params.set_di(Number(simConfig.params?.di ?? STOCHASTIC_RDME_DEFAULTS.params.di));
 
-    params.set_k1(Number(simConfig.params?.k1 ?? 0.002));
-    params.set_k2(Number(simConfig.params?.k2 ?? 0.02));
-    params.set_k3(Number(simConfig.params?.k3 ?? 0.001));
+    params.set_k1(Number(simConfig.params?.k1 ?? STOCHASTIC_RDME_DEFAULTS.params.k1));
+    params.set_k2(Number(simConfig.params?.k2 ?? STOCHASTIC_RDME_DEFAULTS.params.k2));
+    params.set_k3(Number(simConfig.params?.k3 ?? STOCHASTIC_RDME_DEFAULTS.params.k3));
 
-    params.set_feed_base(Number(simConfig.params?.feedBase ?? 2.0));
-    params.set_feed_noise_amp(Number(simConfig.params?.feedNoiseAmp ?? 0.35));
-    params.set_feed_noise_scale(toU32(simConfig.params?.feedNoiseScale, 8));
+    params.set_feed_base(Number(simConfig.params?.feedBase ?? STOCHASTIC_RDME_DEFAULTS.params.feedBase));
+    params.set_feed_noise_amp(Number(simConfig.params?.feedNoiseAmp ?? STOCHASTIC_RDME_DEFAULTS.params.feedNoiseAmp));
+    params.set_feed_noise_scale(toU32(simConfig.params?.feedNoiseScale, STOCHASTIC_RDME_DEFAULTS.params.feedNoiseScale));
 
-    params.set_d_a(Number(simConfig.params?.decayA ?? 0.01));
-    params.set_d_i(Number(simConfig.params?.decayI ?? 0.005));
-    params.set_d_f(Number(simConfig.params?.decayF ?? 0.0));
+    params.set_d_a(Number(simConfig.params?.decayA ?? STOCHASTIC_RDME_DEFAULTS.params.decayA));
+    params.set_d_i(Number(simConfig.params?.decayI ?? STOCHASTIC_RDME_DEFAULTS.params.decayI));
+    params.set_d_f(Number(simConfig.params?.decayF ?? STOCHASTIC_RDME_DEFAULTS.params.decayF));
 
-    params.set_eta_scale(Number(simConfig.params?.etaScale ?? 0.25));
+    params.set_eta_scale(Number(simConfig.params?.etaScale ?? STOCHASTIC_RDME_DEFAULTS.params.etaScale));
 
-    params.set_aliveness_alpha(Number(simConfig.params?.alivenessAlpha ?? 0.25));
-    params.set_aliveness_gain(Number(simConfig.params?.alivenessGain ?? 0.05));
+    params.set_aliveness_alpha(Number(simConfig.params?.alivenessAlpha ?? STOCHASTIC_RDME_DEFAULTS.params.alivenessAlpha));
+    params.set_aliveness_gain(Number(simConfig.params?.alivenessGain ?? STOCHASTIC_RDME_DEFAULTS.params.alivenessGain));
 
     // Optional stability knob (defaults to 1 in Rust).
     if (typeof params.set_substeps === "function") {
-      params.set_substeps(toU32(simConfig.params?.substeps, 1));
+      params.set_substeps(toU32(simConfig.params?.substeps, STOCHASTIC_RDME_DEFAULTS.params.substeps));
     }
 
     sim = new StochasticRdmeSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.05));
+    sim.set_dt(Number(simConfig.dt ?? STOCHASTIC_RDME_DEFAULTS.dt));
 
-    const seeding = simConfig.seeding ?? {};
+    const seeding = { ...STOCHASTIC_RDME_DEFAULTS.seeding, ...(simConfig.seeding ?? {}) };
     if (!seeding.type || seeding.type === "perlin") {
       sim.seed_perlin(
-        Number(seeding.frequency ?? 6.0),
-        toU32(seeding.octaves, 4),
-        toU32(seeding.baseF, 50),
-        toU32(seeding.baseI, 0),
-        Number(seeding.aBias ?? 0.0),
-        Number(seeding.aAmp ?? 20.0),
+        Number(seeding.frequency ?? STOCHASTIC_RDME_DEFAULTS.seeding.frequency),
+        toU32(seeding.octaves, STOCHASTIC_RDME_DEFAULTS.seeding.octaves),
+        toU32(seeding.baseF, STOCHASTIC_RDME_DEFAULTS.seeding.baseF),
+        toU32(seeding.baseI, STOCHASTIC_RDME_DEFAULTS.seeding.baseI),
+        Number(seeding.aBias ?? STOCHASTIC_RDME_DEFAULTS.seeding.aBias),
+        Number(seeding.aAmp ?? STOCHASTIC_RDME_DEFAULTS.seeding.aAmp),
       );
     } else if (seeding.type === "spheres") {
       sim.seed_spheres(
@@ -724,93 +773,65 @@ async function restartSimulation() {
   } else if (strategyId === "cahn_hilliard") {
     const params = new CahnHilliardParams();
  
-    params.set_a(Number(simConfig.params?.a ?? 1.0));
-    params.set_kappa(Number(simConfig.params?.kappa ?? 1.0));
-    params.set_m(Number(simConfig.params?.m ?? 0.2));
+    params.set_a(Number(simConfig.params?.a ?? CAHN_HILLIARD_DEFAULTS.params.a));
+    params.set_kappa(Number(simConfig.params?.kappa ?? CAHN_HILLIARD_DEFAULTS.params.kappa));
+    params.set_m(Number(simConfig.params?.m ?? CAHN_HILLIARD_DEFAULTS.params.m));
 
     if (typeof params.set_substeps === "function") {
-      params.set_substeps(toU32(simConfig.params?.substeps, 4));
+      params.set_substeps(toU32(simConfig.params?.substeps, CAHN_HILLIARD_DEFAULTS.params.substeps));
     }
     if (typeof params.set_pass_mode === "function") {
-      params.set_pass_mode(toU32(simConfig.params?.passMode, 2));
+      params.set_pass_mode(toU32(simConfig.params?.passMode, CAHN_HILLIARD_DEFAULTS.params.passMode));
     }
     if (typeof params.set_approx_mode === "function") {
-      params.set_approx_mode(toU32(simConfig.params?.approxMode, 0));
+      params.set_approx_mode(toU32(simConfig.params?.approxMode, CAHN_HILLIARD_DEFAULTS.params.approxMode));
     }
 
     // Seeding controls.
     if (typeof params.set_phi_mean === "function") {
-      params.set_phi_mean(Number(simConfig.params?.phiMean ?? 0.0));
+      params.set_phi_mean(Number(simConfig.params?.phiMean ?? CAHN_HILLIARD_DEFAULTS.params.phiMean));
     }
     if (typeof params.set_noise_amp === "function") {
-      params.set_noise_amp(Number(simConfig.params?.noiseAmp ?? 0.01));
+      params.set_noise_amp(Number(simConfig.params?.noiseAmp ?? CAHN_HILLIARD_DEFAULTS.params.noiseAmp));
     }
 
     sim = new CahnHilliardSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.002));
+    sim.set_dt(Number(simConfig.dt ?? CAHN_HILLIARD_DEFAULTS.dt));
 
-    const seeding = simConfig.seeding ?? {};
+    const seeding = { ...CAHN_HILLIARD_DEFAULTS.seeding, ...(simConfig.seeding ?? {}) };
 
     // Deterministic spinodal noise init (optionally override params).
-    const mean = Number(seeding.phiMean ?? simConfig.params?.phiMean ?? 0.0);
-    const amp = Number(seeding.noiseAmp ?? simConfig.params?.noiseAmp ?? 0.02);
+    const mean = Number(seeding.phiMean ?? simConfig.params?.phiMean ?? CAHN_HILLIARD_DEFAULTS.seeding.phiMean);
+    const amp = Number(seeding.noiseAmp ?? simConfig.params?.noiseAmp ?? CAHN_HILLIARD_DEFAULTS.seeding.noiseAmp);
     if (typeof sim.seed_spinodal === "function") {
       sim.seed_spinodal(mean, amp);
     }
 
     // Export mode selection (separate from initialization).
     // For backwards compatibility, if exportMode isn't set, we pick something based on seeding.
-    const modeId = simConfig.exportMode;
-
-    if (modeId === "phase") {
-      if (typeof sim.set_export_mode === "function") sim.set_export_mode(0);
-      if (typeof sim.set_export_gain === "function") sim.set_export_gain(6.0);
-    } else if (modeId === "phase_tanh") {
-      if (typeof sim.set_export_mode === "function") sim.set_export_mode(2);
-      if (typeof sim.set_export_gain === "function") sim.set_export_gain(0.6);
-    } else if (modeId === "membranes") {
-      if (typeof sim.set_export_mode === "function") sim.set_export_mode(1);
-      if (typeof sim.set_export_gain === "function") sim.set_export_gain(4.0);
-    } else if (modeId === "energy") {
-      if (typeof sim.set_export_mode === "function") sim.set_export_mode(3);
-      if (typeof sim.set_export_gain === "function") sim.set_export_gain(2.0);
-    } else {
-      // Fallback mapping based on seeding type.
-      if (!seeding.type || seeding.type === "spinodal" || seeding.type === "droplets") {
-        if (typeof sim.set_export_mode === "function") sim.set_export_mode(2);
-        if (typeof sim.set_export_gain === "function") sim.set_export_gain(0.6);
-      } else if (seeding.type === "membranes") {
-        if (typeof sim.set_export_mode === "function") sim.set_export_mode(1);
-        if (typeof sim.set_export_gain === "function") sim.set_export_gain(4.0);
-      } else if (seeding.type === "energy") {
-        if (typeof sim.set_export_mode === "function") sim.set_export_mode(3);
-        if (typeof sim.set_export_gain === "function") sim.set_export_gain(2.0);
-      } else {
-        throw new Error(`unknown cahn-hilliard seeding type: ${String(seeding.type)}`);
-      }
-    }
+    applyCahnHilliardExportMode(sim, simConfig.exportMode, seeding.type);
   } else if (strategyId === "excitable_media") {
     const params = new ExcitableMediaParams();
 
-    params.set_epsilon(Number(simConfig.params?.epsilon ?? 0.03));
-    params.set_a(Number(simConfig.params?.a ?? 0.75));
-    params.set_b(Number(simConfig.params?.b ?? 0.02));
-    params.set_du(Number(simConfig.params?.du ?? 1.0));
-    params.set_dv(Number(simConfig.params?.dv ?? 0.0));
+    params.set_epsilon(Number(simConfig.params?.epsilon ?? EXCITABLE_MEDIA_DEFAULTS.params.epsilon));
+    params.set_a(Number(simConfig.params?.a ?? EXCITABLE_MEDIA_DEFAULTS.params.a));
+    params.set_b(Number(simConfig.params?.b ?? EXCITABLE_MEDIA_DEFAULTS.params.b));
+    params.set_du(Number(simConfig.params?.du ?? EXCITABLE_MEDIA_DEFAULTS.params.du));
+    params.set_dv(Number(simConfig.params?.dv ?? EXCITABLE_MEDIA_DEFAULTS.params.dv));
 
     if (typeof params.set_substeps === "function") {
-      params.set_substeps(toU32(simConfig.params?.substeps, 1));
+      params.set_substeps(toU32(simConfig.params?.substeps, EXCITABLE_MEDIA_DEFAULTS.params.substeps));
     }
 
     // Optional: seeding presets can also tweak params/dt (we apply before constructing).
-    const seeding = simConfig.seeding ?? {};
+    const seeding = { ...EXCITABLE_MEDIA_DEFAULTS.seeding, ...(simConfig.seeding ?? {}) };
     if (seeding.preset === "A") {
       // A: self-sustaining turbulence (more nucleation)
-      params.set_epsilon(Number(seeding.epsilon ?? simConfig.params?.epsilon ?? 0.03));
-      params.set_a(Number(seeding.a ?? simConfig.params?.a ?? 0.85));
-      params.set_b(Number(seeding.b ?? simConfig.params?.b ?? 0.01));
-      params.set_du(Number(seeding.du ?? simConfig.params?.du ?? 1.0));
-      params.set_dv(Number(seeding.dv ?? simConfig.params?.dv ?? 0.0));
+      params.set_epsilon(Number(seeding.epsilon ?? simConfig.params?.epsilon ?? EXCITABLE_MEDIA_DEFAULTS.params.epsilon));
+      params.set_a(Number(seeding.a ?? simConfig.params?.a ?? EXCITABLE_MEDIA_DEFAULTS.params.a));
+      params.set_b(Number(seeding.b ?? simConfig.params?.b ?? EXCITABLE_MEDIA_DEFAULTS.params.b));
+      params.set_du(Number(seeding.du ?? simConfig.params?.du ?? EXCITABLE_MEDIA_DEFAULTS.params.du));
+      params.set_dv(Number(seeding.dv ?? simConfig.params?.dv ?? EXCITABLE_MEDIA_DEFAULTS.params.dv));
     } else if (seeding.preset === "B") {
       // B: longer-lived scroll-wave-ish regime (fewer, larger sources)
       params.set_epsilon(Number(seeding.epsilon ?? simConfig.params?.epsilon ?? 0.04));
@@ -821,10 +842,13 @@ async function restartSimulation() {
     }
 
     sim = new ExcitableMediaSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(seeding.dt ?? simConfig.dt ?? 0.01));
+    sim.set_dt(Number(seeding.dt ?? simConfig.dt ?? EXCITABLE_MEDIA_DEFAULTS.dt));
 
     if (!seeding.type || seeding.type === "random") {
-      sim.seed_random(Number(seeding.noiseAmp ?? 0.02), Number(seeding.excitedProb ?? 0.002));
+      sim.seed_random(
+        Number(seeding.noiseAmp ?? EXCITABLE_MEDIA_DEFAULTS.seeding.noiseAmp),
+        Number(seeding.excitedProb ?? EXCITABLE_MEDIA_DEFAULTS.seeding.excitedProb),
+      );
     } else if (seeding.type === "sources") {
       sim.seed_sources(
         toU32(seeding.sourceCount, 8),
@@ -838,30 +862,34 @@ async function restartSimulation() {
     const params = new ReplicatorMutatorParams();
  
     // Core model params.
-    if (typeof params.set_types === "function") params.set_types(toU32(simConfig.params?.types, 4));
+    if (typeof params.set_types === "function") params.set_types(toU32(simConfig.params?.types, REPLICATOR_MUTATOR_DEFAULTS.params.types));
  
-    params.set_g_base(Number(simConfig.params?.gBase ?? 0.06));
-    params.set_g_spread(Number(simConfig.params?.gSpread ?? 0.20));
-    params.set_d_r(Number(simConfig.params?.dR ?? 0.03));
+    params.set_g_base(Number(simConfig.params?.gBase ?? REPLICATOR_MUTATOR_DEFAULTS.params.gBase));
+    params.set_g_spread(Number(simConfig.params?.gSpread ?? REPLICATOR_MUTATOR_DEFAULTS.params.gSpread));
+    params.set_d_r(Number(simConfig.params?.dR ?? REPLICATOR_MUTATOR_DEFAULTS.params.dR));
 
-    params.set_feed_rate(Number(simConfig.params?.feedRate ?? 0.04));
-    params.set_d_f(Number(simConfig.params?.dF ?? 0.01));
+    params.set_feed_rate(Number(simConfig.params?.feedRate ?? REPLICATOR_MUTATOR_DEFAULTS.params.feedRate));
+    params.set_d_f(Number(simConfig.params?.dF ?? REPLICATOR_MUTATOR_DEFAULTS.params.dF));
 
-    params.set_mu(Number(simConfig.params?.mu ?? 0.003));
+    params.set_mu(Number(simConfig.params?.mu ?? REPLICATOR_MUTATOR_DEFAULTS.params.mu));
 
-    params.set_d_r_diff(Number(simConfig.params?.diffR ?? 0.01));
-    params.set_d_f_diff(Number(simConfig.params?.diffF ?? 0.20));
+    params.set_d_r_diff(Number(simConfig.params?.diffR ?? REPLICATOR_MUTATOR_DEFAULTS.params.diffR));
+    params.set_d_f_diff(Number(simConfig.params?.diffF ?? REPLICATOR_MUTATOR_DEFAULTS.params.diffF));
 
     if (typeof params.set_substeps === "function") {
-      params.set_substeps(toU32(simConfig.params?.substeps, 2));
+      params.set_substeps(toU32(simConfig.params?.substeps, REPLICATOR_MUTATOR_DEFAULTS.params.substeps));
     }
 
     sim = new ReplicatorMutatorSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.02));
+    sim.set_dt(Number(simConfig.dt ?? REPLICATOR_MUTATOR_DEFAULTS.dt));
 
-    const seeding = simConfig.seeding ?? {};
+    const seeding = { ...REPLICATOR_MUTATOR_DEFAULTS.seeding, ...(simConfig.seeding ?? {}) };
     if (!seeding.type || seeding.type === "uniform") {
-      sim.seed_uniform(Number(seeding.noiseAmp ?? 0.02), Number(seeding.rBase ?? 0.012), Number(seeding.fInit ?? 0.8));
+      sim.seed_uniform(
+        Number(seeding.noiseAmp ?? REPLICATOR_MUTATOR_DEFAULTS.seeding.noiseAmp),
+        Number(seeding.rBase ?? REPLICATOR_MUTATOR_DEFAULTS.seeding.rBase),
+        Number(seeding.fInit ?? REPLICATOR_MUTATOR_DEFAULTS.seeding.fInit),
+      );
     } else if (seeding.type === "regions") {
       sim.seed_regions(Number(seeding.noiseAmp ?? 0.01), Number(seeding.rPeak ?? 0.08), Number(seeding.fInit ?? 0.8));
     } else if (seeding.type === "gradient") {
@@ -881,27 +909,27 @@ async function restartSimulation() {
     if (seeding.type === "gradient") {
       sim.set_feed_gradient(Number(seeding.feedBase ?? 0.04), Number(seeding.feedAmp ?? 1.0), toU32(seeding.axis, 0));
     } else {
-      sim.set_feed_uniform(Number(seeding.feedRate ?? simConfig.params?.feedRate ?? 0.04));
+      sim.set_feed_uniform(Number(seeding.feedRate ?? simConfig.params?.feedRate ?? REPLICATOR_MUTATOR_DEFAULTS.params.feedRate));
     }
   } else if (strategyId === "lenia") {
     const params = new LeniaParams();
 
-    params.set_radius(toU32(simConfig.params?.radius, 5));
-    params.set_mu(Number(simConfig.params?.mu ?? 0.15));
-    params.set_sigma(Number(simConfig.params?.sigma ?? 0.03));
-    params.set_kernel_sharpness(Number(simConfig.params?.sharpness ?? 1.0));
+    params.set_radius(toU32(simConfig.params?.radius, LENIA_DEFAULTS.params.radius));
+    params.set_mu(Number(simConfig.params?.mu ?? LENIA_DEFAULTS.params.mu));
+    params.set_sigma(Number(simConfig.params?.sigma ?? LENIA_DEFAULTS.params.sigma));
+    params.set_kernel_sharpness(Number(simConfig.params?.sharpness ?? LENIA_DEFAULTS.params.sharpness));
 
     sim = new LeniaSimulation(dims, dims, dims, currentSeed, params);
-    sim.set_dt(Number(simConfig.dt ?? 0.010));
+    sim.set_dt(Number(simConfig.dt ?? LENIA_DEFAULTS.dt));
 
-    const seeding = simConfig.seeding ?? {};
-    if (!seeding.type || seeding.type === "noise") {
+    const seeding = { ...LENIA_DEFAULTS.seeding, ...(simConfig.seeding ?? {}) };
+    if (seeding.type === "noise") {
       sim.seed_noise(Number(seeding.amp ?? 0.02));
     } else if (seeding.type === "blobs") {
       sim.seed_blobs(
-        toU32(seeding.blobCount, 12),
-        Number(seeding.radius01 ?? 0.08),
-        Number(seeding.peak ?? 1.0),
+        toU32(seeding.blobCount, LENIA_DEFAULTS.seeding.blobCount),
+        Number(seeding.radius01 ?? LENIA_DEFAULTS.seeding.radius01),
+        Number(seeding.peak ?? LENIA_DEFAULTS.seeding.peak),
       );
     } else {
       throw new Error(`unknown lenia seeding type: ${String(seeding.type)}`);
@@ -918,8 +946,8 @@ async function restartSimulation() {
   sim.step(1);
   publishKeyframe(Date.now());
 
-  self.postMessage({ type: "sim_ready" });
-  self.postMessage({ type: "mesh_ready" });
+  self.postMessage({ type: MSG_TYPES.SIM_READY });
+  self.postMessage({ type: MSG_TYPES.MESH_READY });
 
   startLoop();
 }
@@ -984,8 +1012,8 @@ self.onmessage = (e) => {
   const msg = e.data;
   if (!msg || typeof msg !== "object") return;
 
-  if (msg.type === "init") {
-    dims = Number.isFinite(msg.dims) ? Math.trunc(msg.dims) : DEFAULT_DIMS;
+  if (msg.type === MSG_TYPES.INIT) {
+    dims = clampInt(Number.isFinite(msg.dims) ? Math.trunc(msg.dims) : DEFAULT_DIMS, 16, 256);
     currentSeed = Number.isFinite(msg.seed) ? (Math.trunc(msg.seed) >>> 0) : 1337;
 
     if (msg.simConfig) mergeSimConfig(msg.simConfig);
@@ -993,18 +1021,18 @@ self.onmessage = (e) => {
     void ensureWasm(msg.threadCount)
       .then(() => restartSimulation())
       .catch((err) => {
-        self.postMessage({ type: "error", message: String(err?.stack || err) });
+        self.postMessage({ type: MSG_TYPES.ERROR, message: String(err?.stack || err) });
       });
 
     return;
   }
 
-  if (msg.type === "camera") {
+  if (msg.type === MSG_TYPES.CAMERA) {
     handleCamera(msg);
     return;
   }
 
-  if (msg.type === "sim_config") {
+  if (msg.type === MSG_TYPES.SIM_CONFIG) {
     const update = msg.config && typeof msg.config === "object" ? msg.config : msg;
 
     const prevStrategyId = simConfig.strategyId;
@@ -1020,23 +1048,14 @@ self.onmessage = (e) => {
 
     if (strategyChanged || paramsChanged || seedingChanged) {
       void restartSimulation().catch((err) => {
-        self.postMessage({ type: "error", message: String(err?.stack || err) });
+        self.postMessage({ type: MSG_TYPES.ERROR, message: String(err?.stack || err) });
       });
       return;
     }
 
     // Allow changing export mode without restarting the simulation.
     if (exportChanged && simKind === "cahn_hilliard" && sim && typeof sim.set_export_mode === "function") {
-      const modeId = simConfig.exportMode;
-      if (modeId === "phase") {
-        sim.set_export_mode(0);
-      } else if (modeId === "phase_tanh") {
-        sim.set_export_mode(2);
-      } else if (modeId === "membranes") {
-        sim.set_export_mode(1);
-      } else if (modeId === "energy") {
-        sim.set_export_mode(3);
-      }
+      applyCahnHilliardExportMode(sim, simConfig.exportMode, simConfig.seeding?.type);
       // Ensure a fresh v field is available for meshing.
       if (typeof sim.recompute_chunk_ranges_from_v === "function") {
         sim.recompute_chunk_ranges_from_v();
