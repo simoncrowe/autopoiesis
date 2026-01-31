@@ -1,7 +1,18 @@
+import { MSG_TYPES } from "./msg_types.js";
+import {
+  GRAY_SCOTT_DEFAULTS,
+  STOCHASTIC_RDME_DEFAULTS,
+  CAHN_HILLIARD_DEFAULTS,
+  EXCITABLE_MEDIA_DEFAULTS,
+  REPLICATOR_MUTATOR_DEFAULTS,
+  LENIA_DEFAULTS,
+} from "./sim_defaults.js";
+
 const seedInput = document.querySelector("#seed");
 const simStrategySelect = document.querySelector("#simStrategy");
 const simInitSelect = document.querySelector("#simInit");
 const simExportSelect = document.querySelector("#simExport");
+const simExportLabel = simExportSelect?.closest?.("label") ?? null;
 const simParamsEl = document.querySelector("#simParams");
 const volumeThresholdInput = document.querySelector("#volumeThreshold");
 const viewRadiusInput = document.querySelector("#viewRadius");
@@ -72,6 +83,92 @@ export function createHudController({
   let aoSoftness = 3;
   let aoBias = 0.002;
 
+  // Per-strategy visual defaults.
+  // This prevents cross-strategy "carry" when switching strategies.
+  const visualDefaultsByStrategyId = {
+    gray_scott: {
+      display: { viewRadius: 0.60, volumeThreshold: 0.25, gradMagGain: 12.0, meshOpacity: 0.75, lightIntensity: 1.0 },
+      ao: { enabled: false, intensity: 1.5, radiusPx: 16, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.40, backStrength: 0.40, backPower: 2.0 },
+    },
+    stochastic_rdme: {
+      display: { viewRadius: 0.40, volumeThreshold: 0.10, gradMagGain: 10.0, meshOpacity: 0.70, lightIntensity: 1.0 },
+      ao: { enabled: false, intensity: 1.35, radiusPx: 18, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.45, backStrength: 0.35, backPower: 2.2 },
+    },
+    cahn_hilliard: {
+      display: { viewRadius: 0.35, volumeThreshold: 0.50, gradMagGain: 1.0, meshOpacity: 0.70, lightIntensity: 1.0 },
+      ao: { enabled: true, intensity: 1.7, radiusPx: 18, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.38, backStrength: 0.45, backPower: 1.8 },
+    },
+    excitable_media: {
+      display: { viewRadius: 0.60, volumeThreshold: 0.50, gradMagGain: 4.0, meshOpacity: 0.55, lightIntensity: 1.0 },
+      ao: { enabled: false, intensity: 1.4, radiusPx: 16, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.50, backStrength: 0.30, backPower: 2.4 },
+    },
+    replicator_mutator: {
+      display: { viewRadius: 0.55, volumeThreshold: 0.15, gradMagGain: 3.0, meshOpacity: 0.65, lightIntensity: 1.0 },
+      ao: { enabled: false, intensity: 1.5, radiusPx: 18, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.42, backStrength: 0.40, backPower: 2.0 },
+    },
+    lenia: {
+      display: { viewRadius: 0.45, volumeThreshold: 0.50, gradMagGain: 1.0, meshOpacity: 0.70, lightIntensity: 0.95 },
+      ao: { enabled: true, intensity: 1.55, radiusPx: 16, samples: 8, softness: 3, bias: 0.002 },
+      sss: { enabled: false, wrap: 0.40, backStrength: 0.45, backPower: 1.9 },
+    },
+  };
+
+  function applyVisualDefaultsForStrategy(strategyId) {
+    const preset = visualDefaultsByStrategyId?.[strategyId] ?? visualDefaultsByStrategyId?.gray_scott;
+    if (!preset) return;
+
+    // General display
+    viewRadius = Number(preset.display?.viewRadius ?? viewRadius);
+    volumeThreshold = Number(preset.display?.volumeThreshold ?? volumeThreshold);
+    gradMagGain = Number(preset.display?.gradMagGain ?? gradMagGain);
+    meshOpacity = Number(preset.display?.meshOpacity ?? meshOpacity);
+    lightIntensity = Number(preset.display?.lightIntensity ?? lightIntensity);
+
+    // Keep the mesh alpha in sync.
+    meshColor[3] = meshOpacity;
+
+    if (volumeThresholdInput) volumeThresholdInput.value = volumeThreshold.toFixed(2);
+    if (viewRadiusInput) viewRadiusInput.value = viewRadius.toFixed(2);
+    if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
+    if (meshOpacityInput) meshOpacityInput.value = meshOpacity.toFixed(2);
+    if (lightIntensityInput) setNumberInputValue(lightIntensityInput, lightIntensity, lightIntensityInput.step);
+
+    // AO
+    aoEnabled = Boolean(preset.ao?.enabled);
+    aoIntensity = Number(preset.ao?.intensity ?? aoIntensity);
+    aoRadiusPx = Number(preset.ao?.radiusPx ?? aoRadiusPx);
+    aoSamples = Math.trunc(Number(preset.ao?.samples ?? aoSamples));
+    aoSoftness = Math.trunc(Number(preset.ao?.softness ?? aoSoftness));
+    aoBias = Number(preset.ao?.bias ?? aoBias);
+
+    if (aoEnabledInput) aoEnabledInput.checked = aoEnabled;
+    if (aoIntensityInput) setNumberInputValue(aoIntensityInput, aoIntensity, aoIntensityInput.step);
+    if (aoRadiusInput) setNumberInputValue(aoRadiusInput, aoRadiusPx, aoRadiusInput.step);
+    if (aoSamplesInput) setNumberInputValue(aoSamplesInput, aoSamples, aoSamplesInput.step);
+    if (aoSoftnessInput) setNumberInputValue(aoSoftnessInput, aoSoftness, aoSoftnessInput.step);
+    if (aoBiasInput) setNumberInputValue(aoBiasInput, aoBias, aoBiasInput.step);
+
+    // SSS
+    sssEnabled = Boolean(preset.sss?.enabled);
+    sssWrap = Number(preset.sss?.wrap ?? sssWrap);
+    sssBackStrength = Number(preset.sss?.backStrength ?? sssBackStrength);
+    sssBackPower = Number(preset.sss?.backPower ?? sssBackPower);
+
+    if (sssEnabledInput) sssEnabledInput.checked = sssEnabled;
+    if (sssWrapInput) setNumberInputValue(sssWrapInput, sssWrap, sssWrapInput.step);
+    if (sssBackStrengthInput) setNumberInputValue(sssBackStrengthInput, sssBackStrength, sssBackStrengthInput.step);
+    if (sssBackPowerInput) setNumberInputValue(sssBackPowerInput, sssBackPower, sssBackPowerInput.step);
+
+    // Refresh disabled/enabled states (declared later in this scope).
+    if (typeof updateAoUi === "function") updateAoUi();
+    if (typeof updateSssUi === "function") updateSssUi();
+  }
+
 
   const simExportModes = {
     // Shared IDs; not every strategy will expose all.
@@ -93,7 +190,7 @@ export function createHudController({
           min: 16,
           max: 256,
           step: 1,
-          defaultValue: 128,
+          defaultValue: GRAY_SCOTT_DEFAULTS.dims,
           requiresRestart: true,
         },
         {
@@ -103,7 +200,7 @@ export function createHudController({
           min: 0,
           max: 1,
           step: 0.001,
-          defaultValue: 0.16,
+          defaultValue: GRAY_SCOTT_DEFAULTS.params.du,
           requiresRestart: true,
         },
         {
@@ -113,7 +210,7 @@ export function createHudController({
           min: 0,
           max: 1,
           step: 0.001,
-          defaultValue: 0.08,
+          defaultValue: GRAY_SCOTT_DEFAULTS.params.dv,
           requiresRestart: true,
         },
         {
@@ -123,7 +220,7 @@ export function createHudController({
           min: 0,
           max: 0.1,
           step: 0.0001,
-          defaultValue: 0.0367,
+          defaultValue: GRAY_SCOTT_DEFAULTS.params.feed,
           requiresRestart: true,
         },
         {
@@ -133,7 +230,7 @@ export function createHudController({
           min: 0,
           max: 0.1,
           step: 0.0001,
-          defaultValue: 0.0649,
+          defaultValue: GRAY_SCOTT_DEFAULTS.params.kill,
           requiresRestart: true,
         },
         {
@@ -143,7 +240,7 @@ export function createHudController({
           min: 0.001,
           max: 1,
           step: 0.001,
-          defaultValue: 0.1,
+          defaultValue: GRAY_SCOTT_DEFAULTS.dt,
           requiresRestart: false,
         },
         {
@@ -153,7 +250,7 @@ export function createHudController({
           min: 1,
           max: 60,
           step: 1,
-          defaultValue: 5,
+          defaultValue: GRAY_SCOTT_DEFAULTS.ticksPerSecond,
           requiresRestart: false,
         },
       ],
@@ -162,11 +259,7 @@ export function createHudController({
           id: "perlin",
           name: "Perlin noise",
           config: {
-            type: "perlin",
-            frequency: 6.0,
-            octaves: 4,
-            v_bias: 0.0,
-            v_amp: 1.0,
+            ...GRAY_SCOTT_DEFAULTS.seeding,
           },
         },
         {
@@ -189,44 +282,38 @@ export function createHudController({
       id: "stochastic_rdme",
       name: "Stochastic RDME",
       params: [
-        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 128, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: 0.05, requiresRestart: false },
-        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
+        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: STOCHASTIC_RDME_DEFAULTS.dims, requiresRestart: true },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.dt, requiresRestart: false },
+        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: STOCHASTIC_RDME_DEFAULTS.ticksPerSecond, requiresRestart: false },
 
-        { key: "df", path: ["params", "df"], label: "Diffusion F (df)", min: 0, max: 2, step: 0.001, defaultValue: 0.2, requiresRestart: true },
-        { key: "da", path: ["params", "da"], label: "Diffusion A (da)", min: 0, max: 2, step: 0.001, defaultValue: 0.05, requiresRestart: true },
-        { key: "di", path: ["params", "di"], label: "Diffusion I (di)", min: 0, max: 2, step: 0.001, defaultValue: 0.02, requiresRestart: true },
+        { key: "df", path: ["params", "df"], label: "Diffusion F (df)", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.df, requiresRestart: true },
+        { key: "da", path: ["params", "da"], label: "Diffusion A (da)", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.da, requiresRestart: true },
+        { key: "di", path: ["params", "di"], label: "Diffusion I (di)", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.di, requiresRestart: true },
 
-        { key: "k1", path: ["params", "k1"], label: "Rate k1 (A+F->2A)", min: 0, max: 0.1, step: 0.00001, defaultValue: 0.002, requiresRestart: true },
-        { key: "k2", path: ["params", "k2"], label: "Rate k2 (A->A+I)", min: 0, max: 0.5, step: 0.0001, defaultValue: 0.02, requiresRestart: true },
-        { key: "k3", path: ["params", "k3"], label: "Rate k3 (A+I->I)", min: 0, max: 0.1, step: 0.00001, defaultValue: 0.001, requiresRestart: true },
+        { key: "k1", path: ["params", "k1"], label: "Rate k1 (A+F->2A)", min: 0, max: 0.1, step: 0.00001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.k1, requiresRestart: true },
+        { key: "k2", path: ["params", "k2"], label: "Rate k2 (A->A+I)", min: 0, max: 0.5, step: 0.0001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.k2, requiresRestart: true },
+        { key: "k3", path: ["params", "k3"], label: "Rate k3 (A+I->I)", min: 0, max: 0.1, step: 0.00001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.k3, requiresRestart: true },
 
-        { key: "feedBase", path: ["params", "feedBase"], label: "Feed base", min: 0, max: 10, step: 0.001, defaultValue: 2.0, requiresRestart: true },
-        { key: "feedNoiseAmp", path: ["params", "feedNoiseAmp"], label: "Feed noise amp", min: 0, max: 2, step: 0.001, defaultValue: 0.35, requiresRestart: true },
-        { key: "feedNoiseScale", path: ["params", "feedNoiseScale"], label: "Feed noise scale", min: 1, max: 64, step: 1, defaultValue: 8, requiresRestart: true },
+        { key: "feedBase", path: ["params", "feedBase"], label: "Feed base", min: 0, max: 10, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.feedBase, requiresRestart: true },
+        { key: "feedNoiseAmp", path: ["params", "feedNoiseAmp"], label: "Feed noise amp", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.feedNoiseAmp, requiresRestart: true },
+        { key: "feedNoiseScale", path: ["params", "feedNoiseScale"], label: "Feed noise scale", min: 1, max: 64, step: 1, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.feedNoiseScale, requiresRestart: true },
 
-        { key: "decayA", path: ["params", "decayA"], label: "Decay A", min: 0, max: 1, step: 0.0001, defaultValue: 0.01, requiresRestart: true },
-        { key: "decayI", path: ["params", "decayI"], label: "Decay I", min: 0, max: 1, step: 0.0001, defaultValue: 0.005, requiresRestart: true },
-        { key: "decayF", path: ["params", "decayF"], label: "Decay F", min: 0, max: 1, step: 0.0001, defaultValue: 0.0, requiresRestart: true },
+        { key: "decayA", path: ["params", "decayA"], label: "Decay A", min: 0, max: 1, step: 0.0001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.decayA, requiresRestart: true },
+        { key: "decayI", path: ["params", "decayI"], label: "Decay I", min: 0, max: 1, step: 0.0001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.decayI, requiresRestart: true },
+        { key: "decayF", path: ["params", "decayF"], label: "Decay F", min: 0, max: 1, step: 0.0001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.decayF, requiresRestart: true },
 
-        { key: "etaScale", path: ["params", "etaScale"], label: "Noise scale (eta)", min: 0, max: 2, step: 0.001, defaultValue: 0.25, requiresRestart: true },
-        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: 1, requiresRestart: true },
+        { key: "etaScale", path: ["params", "etaScale"], label: "Noise scale (eta)", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.etaScale, requiresRestart: true },
+        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.substeps, requiresRestart: true },
 
-        { key: "alivenessAlpha", path: ["params", "alivenessAlpha"], label: "Aliveness alpha", min: 0, max: 2, step: 0.001, defaultValue: 0.25, requiresRestart: true },
-        { key: "alivenessGain", path: ["params", "alivenessGain"], label: "Aliveness gain", min: 0.00001, max: 1, step: 0.00001, defaultValue: 0.05, requiresRestart: true },
+        { key: "alivenessAlpha", path: ["params", "alivenessAlpha"], label: "Aliveness alpha", min: 0, max: 2, step: 0.001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.alivenessAlpha, requiresRestart: true },
+        { key: "alivenessGain", path: ["params", "alivenessGain"], label: "Aliveness gain", min: 0.00001, max: 1, step: 0.00001, defaultValue: STOCHASTIC_RDME_DEFAULTS.params.alivenessGain, requiresRestart: true },
       ],
       seedings: [
         {
           id: "perlin",
           name: "Perlin noise",
           config: {
-            type: "perlin",
-            frequency: 6.0,
-            octaves: 4,
-            baseF: 50,
-            baseI: 0,
-            aBias: 0.0,
-            aAmp: 20.0,
+            ...STOCHASTIC_RDME_DEFAULTS.seeding,
           },
         },
         {
@@ -258,28 +345,26 @@ export function createHudController({
         simExportModes.energy,
       ],
       params: [
-        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 128, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: 0.002, requiresRestart: false },
-        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
+        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: CAHN_HILLIARD_DEFAULTS.dims, requiresRestart: true },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: CAHN_HILLIARD_DEFAULTS.dt, requiresRestart: false },
+        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: CAHN_HILLIARD_DEFAULTS.ticksPerSecond, requiresRestart: false },
 
-        { key: "a", path: ["params", "a"], label: "Double-well strength (A)", min: 0, max: 5, step: 0.001, defaultValue: 1.0, requiresRestart: true },
-        { key: "kappa", path: ["params", "kappa"], label: "Interface width (kappa)", min: 0, max: 5, step: 0.001, defaultValue: 0.6, requiresRestart: true },
-        { key: "m", path: ["params", "m"], label: "Mobility (M)", min: 0, max: 5, step: 0.001, defaultValue: 0.2, requiresRestart: true },
-        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 16, step: 1, defaultValue: 2, requiresRestart: true },
-        { key: "passMode", path: ["params", "passMode"], label: "Passes (2=full,1=fast)", min: 1, max: 2, step: 1, defaultValue: 1, requiresRestart: true },
-        { key: "approxMode", path: ["params", "approxMode"], label: "2-pass approx (0/1)", min: 0, max: 1, step: 1, defaultValue: 0, requiresRestart: true },
+        { key: "a", path: ["params", "a"], label: "Double-well strength (A)", min: 0, max: 5, step: 0.001, defaultValue: CAHN_HILLIARD_DEFAULTS.params.a, requiresRestart: true },
+        { key: "kappa", path: ["params", "kappa"], label: "Interface width (kappa)", min: 0, max: 5, step: 0.001, defaultValue: CAHN_HILLIARD_DEFAULTS.params.kappa, requiresRestart: true },
+        { key: "m", path: ["params", "m"], label: "Mobility (M)", min: 0, max: 5, step: 0.001, defaultValue: CAHN_HILLIARD_DEFAULTS.params.m, requiresRestart: true },
+        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 16, step: 1, defaultValue: CAHN_HILLIARD_DEFAULTS.params.substeps, requiresRestart: true },
+        { key: "passMode", path: ["params", "passMode"], label: "Passes (2=full,1=fast)", min: 1, max: 2, step: 1, defaultValue: CAHN_HILLIARD_DEFAULTS.params.passMode, requiresRestart: true },
+        { key: "approxMode", path: ["params", "approxMode"], label: "2-pass approx (0/1)", min: 0, max: 1, step: 1, defaultValue: CAHN_HILLIARD_DEFAULTS.params.approxMode, requiresRestart: true },
 
-        { key: "phiMean", path: ["params", "phiMean"], label: "Mean phi", min: -1, max: 1, step: 0.001, defaultValue: -0.45, requiresRestart: true },
-        { key: "noiseAmp", path: ["params", "noiseAmp"], label: "Init noise amp", min: 0, max: 0.2, step: 0.001, defaultValue: 0.02, requiresRestart: true },
+        { key: "phiMean", path: ["params", "phiMean"], label: "Mean phi", min: -1, max: 1, step: 0.001, defaultValue: CAHN_HILLIARD_DEFAULTS.params.phiMean, requiresRestart: true },
+        { key: "noiseAmp", path: ["params", "noiseAmp"], label: "Init noise amp", min: 0, max: 0.2, step: 0.001, defaultValue: CAHN_HILLIARD_DEFAULTS.params.noiseAmp, requiresRestart: true },
       ],
       seedings: [
         {
           id: "spinodal",
           name: "Spinodal (noise)",
           config: {
-            type: "spinodal",
-            phiMean: 0.0,
-            noiseAmp: 0.02,
+            ...CAHN_HILLIARD_DEFAULTS.seeding,
           },
         },
         {
@@ -316,27 +401,25 @@ export function createHudController({
       id: "excitable_media",
       name: "Excitable media (Barkley)",
       params: [
-        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 128, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.05, step: 0.0001, defaultValue: 0.01, requiresRestart: false },
-        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
+        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: EXCITABLE_MEDIA_DEFAULTS.dims, requiresRestart: true },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.05, step: 0.0001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.dt, requiresRestart: false },
+        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: EXCITABLE_MEDIA_DEFAULTS.ticksPerSecond, requiresRestart: false },
 
-        { key: "epsilon", path: ["params", "epsilon"], label: "Timescale sep (epsilon)", min: 0.001, max: 0.2, step: 0.0001, defaultValue: 0.03, requiresRestart: true },
-        { key: "a", path: ["params", "a"], label: "Threshold (a)", min: 0.1, max: 2, step: 0.0001, defaultValue: 0.85, requiresRestart: true },
-        { key: "b", path: ["params", "b"], label: "Bias (b)", min: 0, max: 0.2, step: 0.0001, defaultValue: 0.01, requiresRestart: true },
+        { key: "epsilon", path: ["params", "epsilon"], label: "Timescale sep (epsilon)", min: 0.001, max: 0.2, step: 0.0001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.epsilon, requiresRestart: true },
+        { key: "a", path: ["params", "a"], label: "Threshold (a)", min: 0.1, max: 2, step: 0.0001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.a, requiresRestart: true },
+        { key: "b", path: ["params", "b"], label: "Bias (b)", min: 0, max: 0.2, step: 0.0001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.b, requiresRestart: true },
 
-        { key: "du", path: ["params", "du"], label: "Diffusion u (Du)", min: 0, max: 3, step: 0.001, defaultValue: 1.0, requiresRestart: true },
-        { key: "dv", path: ["params", "dv"], label: "Diffusion v (Dv)", min: 0, max: 1, step: 0.001, defaultValue: 0.0, requiresRestart: true },
+        { key: "du", path: ["params", "du"], label: "Diffusion u (Du)", min: 0, max: 3, step: 0.001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.du, requiresRestart: true },
+        { key: "dv", path: ["params", "dv"], label: "Diffusion v (Dv)", min: 0, max: 1, step: 0.001, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.dv, requiresRestart: true },
 
-        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: 1, requiresRestart: true },
+        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: EXCITABLE_MEDIA_DEFAULTS.params.substeps, requiresRestart: true },
       ],
       seedings: [
         {
           id: "random",
           name: "Random excitation",
           config: {
-            type: "random",
-            noiseAmp: 0.02,
-            excitedProb: 0.002,
+            ...EXCITABLE_MEDIA_DEFAULTS.seeding,
           },
         },
         {
@@ -377,36 +460,33 @@ export function createHudController({
       id: "replicator_mutator",
       name: "Replicator-mutator ecology",
       params: [
-        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 128, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: 0.02, requiresRestart: false },
-        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
+        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.dims, requiresRestart: true },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.dt, requiresRestart: false },
+        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.ticksPerSecond, requiresRestart: false },
 
-        { key: "types", path: ["params", "types"], label: "Types (K)", min: 2, max: 8, step: 1, defaultValue: 4, requiresRestart: true },
+        { key: "types", path: ["params", "types"], label: "Types (K)", min: 2, max: 8, step: 1, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.types, requiresRestart: true },
 
         // These defaults aim for long-lived dynamics without runaway biomass.
-        { key: "gBase", path: ["params", "gBase"], label: "Growth base (g0)", min: 0, max: 1, step: 0.0001, defaultValue: 0.06, requiresRestart: true },
-        { key: "gSpread", path: ["params", "gSpread"], label: "Growth spread", min: 0, max: 2, step: 0.0001, defaultValue: 0.20, requiresRestart: true },
-        { key: "dR", path: ["params", "dR"], label: "Replicator decay (dR)", min: 0, max: 1, step: 0.0001, defaultValue: 0.03, requiresRestart: true },
+        { key: "gBase", path: ["params", "gBase"], label: "Growth base (g0)", min: 0, max: 1, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.gBase, requiresRestart: true },
+        { key: "gSpread", path: ["params", "gSpread"], label: "Growth spread", min: 0, max: 2, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.gSpread, requiresRestart: true },
+        { key: "dR", path: ["params", "dR"], label: "Replicator decay (dR)", min: 0, max: 1, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.dR, requiresRestart: true },
 
-        { key: "feedRate", path: ["params", "feedRate"], label: "Feed rate", min: 0, max: 1, step: 0.0001, defaultValue: 0.04, requiresRestart: true },
-        { key: "dF", path: ["params", "dF"], label: "Feed decay (dF)", min: 0, max: 1, step: 0.0001, defaultValue: 0.01, requiresRestart: true },
+        { key: "feedRate", path: ["params", "feedRate"], label: "Feed rate", min: 0, max: 1, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.feedRate, requiresRestart: true },
+        { key: "dF", path: ["params", "dF"], label: "Feed decay (dF)", min: 0, max: 1, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.dF, requiresRestart: true },
 
-        { key: "mu", path: ["params", "mu"], label: "Mutation rate (mu)", min: 0, max: 0.05, step: 0.0001, defaultValue: 0.003, requiresRestart: true },
+        { key: "mu", path: ["params", "mu"], label: "Mutation rate (mu)", min: 0, max: 0.05, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.mu, requiresRestart: true },
 
-        { key: "diffR", path: ["params", "diffR"], label: "Diffusion R (DR)", min: 0, max: 0.2, step: 0.0001, defaultValue: 0.01, requiresRestart: true },
-        { key: "diffF", path: ["params", "diffF"], label: "Diffusion F (DF)", min: 0, max: 2, step: 0.0001, defaultValue: 0.20, requiresRestart: true },
+        { key: "diffR", path: ["params", "diffR"], label: "Diffusion R (DR)", min: 0, max: 0.2, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.diffR, requiresRestart: true },
+        { key: "diffF", path: ["params", "diffF"], label: "Diffusion F (DF)", min: 0, max: 2, step: 0.0001, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.diffF, requiresRestart: true },
 
-        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: 2, requiresRestart: true },
+        { key: "substeps", path: ["params", "substeps"], label: "Substeps", min: 1, max: 8, step: 1, defaultValue: REPLICATOR_MUTATOR_DEFAULTS.params.substeps, requiresRestart: true },
       ],
       seedings: [
         {
           id: "uniform",
           name: "Uniform low density + noise",
           config: {
-            type: "uniform",
-            noiseAmp: 0.02,
-            rBase: 0.012,
-            fInit: 0.8,
+            ...REPLICATOR_MUTATOR_DEFAULTS.seeding,
           },
         },
         {
@@ -439,20 +519,20 @@ export function createHudController({
       id: "lenia",
       name: "Continuous CA (Lenia)",
       params: [
-        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: 64, requiresRestart: true },
-        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: 0.010, requiresRestart: false },
-        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: 5, requiresRestart: false },
+        { key: "dims", path: ["dims"], label: "Grid size (dims)", min: 16, max: 256, step: 1, defaultValue: LENIA_DEFAULTS.dims, requiresRestart: true },
+        { key: "dt", path: ["dt"], label: "Simulation timestep (dt)", min: 0.001, max: 1, step: 0.001, defaultValue: LENIA_DEFAULTS.dt, requiresRestart: false },
+        { key: "ticksPerSecond", path: ["ticksPerSecond"], label: "Publish rate (ticks/s)", min: 1, max: 60, step: 1, defaultValue: LENIA_DEFAULTS.ticksPerSecond, requiresRestart: false },
 
-        { key: "radius", path: ["params", "radius"], label: "Kernel radius (R)", min: 1, max: 10, step: 1, defaultValue: 5, requiresRestart: true },
-        { key: "mu", path: ["params", "mu"], label: "Growth mu", min: 0, max: 1, step: 0.0001, defaultValue: 0.15, requiresRestart: true },
-        { key: "sigma", path: ["params", "sigma"], label: "Growth sigma", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: 0.03, requiresRestart: true },
-        { key: "sharpness", path: ["params", "sharpness"], label: "Kernel sharpness", min: 0.1, max: 4, step: 0.1, defaultValue: 0.5, requiresRestart: true },
+        { key: "radius", path: ["params", "radius"], label: "Kernel radius (R)", min: 1, max: 10, step: 1, defaultValue: LENIA_DEFAULTS.params.radius, requiresRestart: true },
+        { key: "mu", path: ["params", "mu"], label: "Growth mu", min: 0, max: 1, step: 0.0001, defaultValue: LENIA_DEFAULTS.params.mu, requiresRestart: true },
+        { key: "sigma", path: ["params", "sigma"], label: "Growth sigma", min: 0.0001, max: 0.2, step: 0.0001, defaultValue: LENIA_DEFAULTS.params.sigma, requiresRestart: true },
+        { key: "sharpness", path: ["params", "sharpness"], label: "Kernel sharpness", min: 0.1, max: 4, step: 0.1, defaultValue: LENIA_DEFAULTS.params.sharpness, requiresRestart: true },
       ],
       seedings: [
         {
           id: "blobs",
           name: "Seeded blobs",
-          config: { type: "blobs", blobCount: 12, radius01: 0.08, peak: 1.0 },
+          config: { ...LENIA_DEFAULTS.seeding },
         },
         {
           id: "noise",
@@ -465,10 +545,10 @@ export function createHudController({
 
   const simConfig = {
     strategyId: "gray_scott",
-    dims: 128,
+    dims: GRAY_SCOTT_DEFAULTS.dims,
     params: {},
-    dt: 0.1,
-    ticksPerSecond: 5,
+    dt: GRAY_SCOTT_DEFAULTS.dt,
+    ticksPerSecond: GRAY_SCOTT_DEFAULTS.ticksPerSecond,
     seeding: simStrategies.gray_scott.seedings[0].config,
     exportMode: null,
   };
@@ -563,7 +643,7 @@ export function createHudController({
           return;
         }
 
-        getWorker()?.postMessage({ type: "sim_config", config: buildSimConfigUpdate(p.path, next) });
+        getWorker()?.postMessage({ type: MSG_TYPES.SIM_CONFIG, config: buildSimConfigUpdate(p.path, next) });
       };
 
       if (p.requiresRestart) {
@@ -598,7 +678,7 @@ export function createHudController({
       const next = (strategy.seedings ?? []).find((s) => s.id === simInitSelect.value);
       if (!next) return;
       simConfig.seeding = next.config;
-      getWorker()?.postMessage({ type: "sim_config", config: { seeding: simConfig.seeding } });
+      getWorker()?.postMessage({ type: MSG_TYPES.SIM_CONFIG, config: { seeding: simConfig.seeding } });
     };
   }
 
@@ -607,6 +687,8 @@ export function createHudController({
 
     const strategy = simStrategies[simConfig.strategyId];
     simExportSelect.textContent = "";
+
+    if (simExportLabel) simExportLabel.hidden = false;
 
     for (const m of strategy.exportModes ?? []) {
       const opt = document.createElement("option");
@@ -617,6 +699,8 @@ export function createHudController({
 
     if ((strategy.exportModes ?? []).length === 0) {
       simExportSelect.disabled = true;
+      if (simExportLabel) simExportLabel.hidden = true;
+      simExportSelect.onchange = null;
       return;
     }
 
@@ -625,7 +709,7 @@ export function createHudController({
 
     simExportSelect.onchange = () => {
       simConfig.exportMode = simExportSelect.value;
-      getWorker()?.postMessage({ type: "sim_config", config: { exportMode: simConfig.exportMode } });
+      getWorker()?.postMessage({ type: MSG_TYPES.SIM_CONFIG, config: { exportMode: simConfig.exportMode } });
     };
   }
 
@@ -648,51 +732,8 @@ export function createHudController({
       const prevDims = simConfig.dims;
       resetSimConfigForStrategy(nextId);
 
-      // Strategy-specific default isosurface threshold.
-      // (User can still override via the "volume threshold" slider afterward.)
-      if (nextId === "stochastic_rdme") {
-        volumeThreshold = 0.10;
-
-        gradMagGain = 10.0;
-        // RDME tends to look best slightly closer-in by default.
-        viewRadius = 0.40;
-        if (viewRadiusInput) viewRadiusInput.value = viewRadius.toFixed(2);
-      } else if (nextId === "gray_scott") {
-        volumeThreshold = 0.25;
-      } else if (nextId === "cahn_hilliard") {
-        // CH exports a phase boundary centered at v=0.5.
-        volumeThreshold = 0.50;
-
-        // Smaller view radius tends to work better with CH droplets.
-        viewRadius = 0.35;
-        if (viewRadiusInput) viewRadiusInput.value = viewRadius.toFixed(2);
-
-        // CH interface gradients are typically sharper than Gray-Scott.
-        // Use a lower default gain so the ramp doesn't instantly saturate.
-        gradMagGain = 1.0;
-        if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
-      } else if (nextId === "excitable_media") {
-        // Excitable media exported field is raw activator u (unbounded-ish), but iso around 0.5
-        // tends to pick out the wavefront volume nicely.
-        volumeThreshold = 0.50;
-
-        // Wavefronts have fairly strong gradients; keep the gain moderate.
-        gradMagGain = 4.0;
-        if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
-      } else if (nextId === "replicator_mutator") {
-        // Biomass tends to live in a lower range; slightly lower iso works better.
-        volumeThreshold = 0.15;
-
-        gradMagGain = 3.0;
-        if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
-      } else if (nextId === "lenia") {
-        volumeThreshold = 0.50;
-
-        // Lenia fields are smooth; use a lower gain so the ramp doesn't saturate.
-        gradMagGain = 1.0;
-        if (gradMagGainInput) gradMagGainInput.value = String(gradMagGain);
-      }
-      if (volumeThresholdInput) volumeThresholdInput.value = volumeThreshold.toFixed(2);
+      // Apply per-strategy defaults for display + AO + SSS (users can still override after).
+      applyVisualDefaultsForStrategy(nextId);
 
       renderSimInitSelect();
       renderSimExportSelect();
@@ -703,7 +744,7 @@ export function createHudController({
         return;
       }
 
-      getWorker()?.postMessage({ type: "sim_config", config: simConfig });
+      getWorker()?.postMessage({ type: MSG_TYPES.SIM_CONFIG, config: simConfig });
     };
   }
 
@@ -729,12 +770,12 @@ export function createHudController({
   if (sssBackStrengthInput) setNumberInputValue(sssBackStrengthInput, sssBackStrength, sssBackStrengthInput.step);
   if (sssBackPowerInput) setNumberInputValue(sssBackPowerInput, sssBackPower, sssBackPowerInput.step);
 
-  const updateSssUi = () => {
+  function updateSssUi() {
     const enabled = sssEnabled;
     if (sssWrapInput) sssWrapInput.disabled = !enabled;
     if (sssBackStrengthInput) sssBackStrengthInput.disabled = !enabled;
     if (sssBackPowerInput) sssBackPowerInput.disabled = !enabled;
-  };
+  }
 
   sssEnabledInput?.addEventListener("change", () => {
     sssEnabled = sssEnabledInput.checked === true;
@@ -750,14 +791,14 @@ export function createHudController({
   if (aoSoftnessInput) setNumberInputValue(aoSoftnessInput, aoSoftness, aoSoftnessInput.step);
   if (aoBiasInput) setNumberInputValue(aoBiasInput, aoBias, aoBiasInput.step);
 
-  const updateAoUi = () => {
+  function updateAoUi() {
     const enabled = aoEnabled;
     if (aoIntensityInput) aoIntensityInput.disabled = !enabled;
     if (aoRadiusInput) aoRadiusInput.disabled = !enabled;
     if (aoSamplesInput) aoSamplesInput.disabled = !enabled;
     if (aoSoftnessInput) aoSoftnessInput.disabled = !enabled;
     if (aoBiasInput) aoBiasInput.disabled = !enabled;
-  };
+  }
 
   aoEnabledInput?.addEventListener("change", () => {
     aoEnabled = aoEnabledInput.checked === true;
