@@ -1,9 +1,26 @@
-import { FlyCamera, createMouseFlightController } from "./camera.js";
+import { FlyCamera, createMouseFlightController, mat4Invert, mat4Mul, mat4Perspective } from "./camera.js";
 import { createAoBlurProgram, createAoCompositeProgram, createAoProgram, createMeshProgram } from "./shaders.js";
 import { createHudController } from "./config.js";
+import { bootAudio, ensureGlobalReverb, isAudioBooted, noteOn, setFilter, setReverb } from "./synth.js";
+import { DRONE_PROGRESSION, createMusicEngine, mapMaxToReverbRoom, mapMeanToCutoff } from "./music.js";
 
 const canvas = document.querySelector("#c");
 const statsEl = document.querySelector("#stats");
+const audioBootBtn = document.querySelector("#audioBoot");
+const audioTestBtn = document.querySelector("#audioTest");
+const audioMusicBtn = document.querySelector("#audioMusic");
+const audioStatusEl = document.querySelector("#audioStatus");
+const audioStatsEl = document.querySelector("#audioStats");
+
+function setAudioStatus(text) {
+  if (!audioStatusEl) return;
+  audioStatusEl.textContent = text ? `(${text})` : "";
+}
+
+function setAudioStats(text) {
+  if (!audioStatsEl) return;
+  audioStatsEl.textContent = text || "";
+}
 
 function resizeCanvasToDisplaySize(c) {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -15,74 +32,6 @@ function resizeCanvasToDisplaySize(c) {
     return true;
   }
   return false;
-}
-
-function mat4Mul(a, b) {
-  const out = new Float32Array(16);
-  for (let c = 0; c < 4; c++) {
-    for (let r = 0; r < 4; r++) {
-      out[c * 4 + r] =
-        a[0 * 4 + r] * b[c * 4 + 0] +
-        a[1 * 4 + r] * b[c * 4 + 1] +
-        a[2 * 4 + r] * b[c * 4 + 2] +
-        a[3 * 4 + r] * b[c * 4 + 3];
-    }
-  }
-  return out;
-}
-
-function mat4Perspective(fovyRad, aspect, near, far) {
-  const f = 1.0 / Math.tan(fovyRad / 2);
-  const nf = 1 / (near - far);
-  return new Float32Array([
-    f / aspect,
-    0,
-    0,
-    0,
-    0,
-    f,
-    0,
-    0,
-    0,
-    0,
-    (far + near) * nf,
-    -1,
-    0,
-    0,
-    (2 * far * near) * nf,
-    0,
-  ]);
-}
-
-function mat4Invert(m) {
-  const inv = new Float32Array(16);
-
-  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-
-  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-
-  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-
-  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
-
-  let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
-
-  det = 1.0 / det;
-  for (let i = 0; i < 16; i++) inv[i] *= det;
-  return inv;
 }
 
 function createMeshGpu(gl) {
@@ -398,6 +347,13 @@ async function main() {
         return;
       }
 
+      // Future: camera neighbourhood scalar stats (normalized 0..1)
+      if (msg.type === "camera_voxel_stats") {
+        if (Number.isFinite(msg.mean)) statsTarget.mean = Math.max(0, Math.min(1, msg.mean));
+        if (Number.isFinite(msg.max)) statsTarget.max = Math.max(0, Math.min(1, msg.max));
+        return;
+      }
+
       if (msg.type === "mesh") {
         uploadMeshFromBuffers(gl, gpuMesh, msg);
         lastMeshMs = msg.meshMs || 0;
@@ -412,16 +368,140 @@ async function main() {
     };
   }
 
+  // Smoothed camera-neighbourhood stats (normalized 0..1).
+  // Must be initialized before `createHudController` triggers the first worker start.
+  const statsTarget = { mean: 0.5, max: 0.5 };
+  const statsSmooth = { mean: 0.5, max: 0.5 };
+  // Lower smoothing lag so voxel stats influence synth params faster.
+  const SMOOTH_TAU_S = 0.25;
+
+  const updateSmoothedStats = (dt) => {
+    const a = 1 - Math.exp(-Math.max(0, dt) / SMOOTH_TAU_S);
+    statsSmooth.mean += (statsTarget.mean - statsSmooth.mean) * a;
+    statsSmooth.max += (statsTarget.max - statsSmooth.max) * a;
+  };
+
   const hud = createHudController({
     onRestart: (seed, simConfig) => startWorkers(seed, simConfig),
     getWorker: () => computeWorker,
+  });
+
+  function randomSeed32() {
+    if (globalThis.crypto?.getRandomValues) {
+      const u32 = new Uint32Array(1);
+      globalThis.crypto.getRandomValues(u32);
+      return u32[0] >>> 0;
+    }
+    return Math.floor(Math.random() * 2 ** 32) >>> 0;
+  }
+
+  let musicDrone = null;
+  let musicArp = null;
+  const music = {
+    start() {
+      // New seeds each play so the progression paths are fresh.
+      const seedA = randomSeed32();
+      const seedB = randomSeed32();
+
+      musicDrone?.stop();
+      musicArp?.stop();
+
+      musicDrone = createMusicEngine({
+        bpm: 120,
+        seed: seedA,
+        progression: DRONE_PROGRESSION,
+        initialState: "i",
+        arpeggiate: false,
+        barsPerChord: 4,
+        chordChangeProbability: 0.75,
+        retriggerOnHold: false,
+        onNote: (midiNote, params) => {
+          const chordSize = Number.isFinite(params?.chordSize) ? Math.max(1, Math.trunc(params.chordSize)) : 4;
+          noteOn({
+            note: midiNote,
+            amp: 0.33 / chordSize,
+            attack: 2.0,
+            release: 28.0,
+          });
+        },
+        getNoteParams: () => ({}),
+      });
+
+      musicArp = createMusicEngine({
+        bpm: 120,
+        seed: seedB,
+        arpeggiate: true,
+        onNote: (midiNote) => {
+          noteOn({
+            note: midiNote,
+            amp: 0.1,
+            attack: 0.02,
+            release: 1.4,
+          });
+        },
+        getNoteParams: () => ({}),
+      });
+
+      musicDrone.start();
+      musicArp.start();
+    },
+    stop() {
+      musicArp?.stop();
+      musicDrone?.stop();
+    },
+    get running() {
+      return Boolean(musicDrone?.running || musicArp?.running);
+    },
+  };
+
+  const refreshAudioUi = () => {
+    const ok = isAudioBooted();
+    if (audioTestBtn) audioTestBtn.disabled = !ok;
+    if (audioMusicBtn) audioMusicBtn.disabled = !ok;
+    if (audioMusicBtn) audioMusicBtn.textContent = music.running ? "Stop music" : "Start music";
+    setAudioStatus(ok ? (music.running ? "music" : "ready") : "off");
+  };
+
+  refreshAudioUi();
+
+  audioBootBtn?.addEventListener("click", async () => {
+    try {
+      setAudioStatus("booting...");
+      await bootAudio();
+      await ensureGlobalReverb();
+      refreshAudioUi();
+    } catch (e) {
+      console.error(e);
+      setAudioStatus("error");
+    }
+  });
+
+  audioTestBtn?.addEventListener("click", () => {
+    try {
+      // A slightly low note so it's clearly audible.
+      noteOn({ note: 48, amp: 0.22, attack: 0.02, release: 2.5 });
+    } catch (e) {
+      console.error(e);
+      refreshAudioUi();
+    }
+  });
+
+  audioMusicBtn?.addEventListener("click", () => {
+    try {
+      if (music.running) music.stop();
+      else music.start();
+      refreshAudioUi();
+    } catch (e) {
+      console.error(e);
+      refreshAudioUi();
+    }
   });
 
   // Camera -> worker updates.
   let lastCamSendAt = 0;
   function sendCamera() {
     const now = performance.now();
-    if (now - lastCamSendAt < 33) return;
+    if (now - lastCamSendAt < 20) return;
     lastCamSendAt = now;
 
     if (!workerReady || !computeWorker) return;
@@ -462,6 +542,13 @@ async function main() {
   }
 
   let lastT = performance.now();
+  let lastReverbAt = 0;
+  let lastAudioHudAt = 0;
+  let lastFilterAt = 0;
+  let lastCutoff = null;
+  let lastRes = null;
+  let lastReverbRoom = null;
+  let lastReverbMix = null;
   function render(tNow) {
     const dt = Math.min(0.05, (tNow - lastT) / 1000);
     lastT = tNow;
@@ -472,6 +559,48 @@ async function main() {
 
     cameraController.update(dt);
     sendCamera();
+
+    updateSmoothedStats(dt);
+    if (isAudioBooted()) {
+      if (tNow - lastFilterAt > 50) {
+        const cutoff = mapMeanToCutoff(statsSmooth.mean);
+        const res = 0.45;
+        const cutoffChanged = lastCutoff === null || Math.abs(cutoff - lastCutoff) > 0.2;
+        const resChanged = lastRes === null || Math.abs(res - lastRes) > 0.01;
+        if (cutoffChanged || resChanged) {
+          lastFilterAt = tNow;
+          lastCutoff = cutoff;
+          lastRes = res;
+          setFilter({ cutoff, res });
+        }
+      }
+      if (tNow - lastReverbAt > 100) {
+        const camSettings = hud.getCameraSettings();
+        const room = mapMaxToReverbRoom(statsSmooth.max, camSettings.iso);
+        const mix = 0.2 + 0.35 * room;
+
+        const roomChanged = lastReverbRoom === null || Math.abs(room - lastReverbRoom) > 0.01;
+        const mixChanged = lastReverbMix === null || Math.abs(mix - lastReverbMix) > 0.01;
+        if (roomChanged || mixChanged) {
+          lastReverbAt = tNow;
+          lastReverbRoom = room;
+          lastReverbMix = mix;
+          setReverb({ room, mix });
+        }
+      }
+    }
+
+    if (tNow - lastAudioHudAt > 100) {
+      lastAudioHudAt = tNow;
+      const cutoff = mapMeanToCutoff(statsSmooth.mean);
+      const camSettings = hud.getCameraSettings();
+      const room = mapMaxToReverbRoom(statsSmooth.max, camSettings.iso);
+      const mix = 0.2 + 0.35 * room;
+      setAudioStats(
+        `mean ${statsSmooth.mean.toFixed(3)}  max ${statsSmooth.max.toFixed(3)}\n` +
+        `cutoff ${cutoff.toFixed(1)}  reverb room ${room.toFixed(3)}  mix ${mix.toFixed(3)}  amp ${0.14.toFixed(2)}`,
+      );
+    }
 
     const fovyRad = (60 * Math.PI) / 180;
     const tanHalfFovy = Math.tan(fovyRad / 2);
